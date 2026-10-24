@@ -1,0 +1,6 @@
+{
+  "name": "UENR Nav — Smart Campus Navigation",
+  "description": "Smart campus navigation web application for the University of Energy and Natural Resources (UENR) in Sunyani, Ghana. Find buildings, lecture halls, labs, hostels, and get pedestrian walking directions.",
+  "requestFramePermissions": ["geolocation"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

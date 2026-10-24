@@ -1,0 +1,106 @@
+{
+  "entities": {
+    "User": {
+      "title": "User Profile",
+      "description": "Student, staff, or faculty user profile.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "email": { "type": "string", "format": "email" },
+        "displayName": { "type": "string" },
+        "role": { "type": "string", "enum": ["student", "lecturer", "staff", "admin", "visitor"] },
+        "studentId": { "type": "string" },
+        "department": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "email", "role"]
+    },
+    "Favorite": {
+      "title": "Favorite Place",
+      "description": "Bookmarked campus building or facility.",
+      "type": "object",
+      "properties": {
+        "placeId": { "type": "string" },
+        "addedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["placeId", "addedAt"]
+    },
+    "Report": {
+      "title": "Campus Issue Report",
+      "description": "Student or staff report regarding missing building, wrong pin, or blocked path.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "locationId": { "type": "string" },
+        "locationName": { "type": "string" },
+        "issueType": {
+          "type": "string",
+          "enum": ["missing_location", "wrong_pin", "wrong_name", "blocked_path", "incorrect_directions", "other"]
+        },
+        "description": { "type": "string" },
+        "reporterRole": { "type": "string" },
+        "reporterUid": { "type": "string" },
+        "status": { "type": "string", "enum": ["pending", "resolved", "dismissed"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "locationName", "issueType", "description", "status"]
+    },
+    "Notice": {
+      "title": "Campus Notice",
+      "description": "Official campus announcement or detour notice.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "title": { "type": "string" },
+        "message": { "type": "string" },
+        "type": { "type": "string", "enum": ["warning", "info", "critical", "event"] },
+        "active": { "type": "boolean" },
+        "authorUid": { "type": "string" },
+        "postedDate": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "title", "message", "type", "active"]
+    },
+    "CampusLocation": {
+      "title": "Campus Location",
+      "description": "Verified or pending campus building and coordinates.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "shortCode": { "type": "string" },
+        "category": { "type": "string" },
+        "lat": { "type": "number" },
+        "lng": { "type": "number" },
+        "description": { "type": "string" },
+        "verificationStatus": { "type": "string", "enum": ["verified", "pending_verification"] },
+        "accessibility": { "type": "string" }
+      },
+      "required": ["id", "name", "shortCode", "category", "lat", "lng", "verificationStatus"]
+    }
+  },
+  "firestore": {
+    "/users/{uid}": {
+      "schema": "User",
+      "description": "User profile collection, authenticated user access."
+    },
+    "/users/{uid}/favorites/{placeId}": {
+      "schema": "Favorite",
+      "description": "User saved campus locations subcollection."
+    },
+    "/reports/{reportId}": {
+      "schema": "Report",
+      "description": "Student issue reports collection."
+    },
+    "/notices/{noticeId}": {
+      "schema": "Notice",
+      "description": "Campus notices and detour announcements."
+    },
+    "/campusLocations/{locationId}": {
+      "schema": "CampusLocation",
+      "description": "Dynamic campus facilities collection."
+    }
+  }
+}

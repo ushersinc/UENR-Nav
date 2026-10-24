@@ -1,0 +1,164 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // =========================================================================
+    // HELPER FUNCTIONS & GUARDS
+    // =========================================================================
+
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() > 0 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isAdmin() {
+      return isAuthenticated() && (
+        request.auth.token.admin == true ||
+        request.auth.token.role == 'admin' ||
+        ((request.auth.token.email == 'admin@uenr.edu.gh' || request.auth.token.email == 'ushersincoperated@gmail.com') &&
+         request.auth.token.email_verified == true)
+      );
+    }
+
+    // =========================================================================
+    // SCHEMA VALIDATION BLUEPRINTS
+    // =========================================================================
+
+    function isValidUser(data) {
+      return data.keys().hasAll(['uid', 'email', 'role']) &&
+        data.uid is string && isValidId(data.uid) &&
+        data.email is string && data.email.size() > 3 && data.email.size() <= 200 &&
+        data.role in ['student', 'lecturer', 'staff', 'admin', 'visitor'] &&
+        (!('displayName' in data) || (data.displayName is string && data.displayName.size() <= 100)) &&
+        (!('department' in data) || (data.department is string && data.department.size() <= 150)) &&
+        (!('studentId' in data) || (data.studentId is string && data.studentId.size() <= 50));
+    }
+
+    function isValidFavorite(data) {
+      return data.keys().hasAll(['placeId']) &&
+        data.placeId is string && isValidId(data.placeId) &&
+        (!('addedAt' in data) || (data.addedAt is string && data.addedAt.size() <= 50));
+    }
+
+    function isValidReport(data) {
+      return data.keys().hasAll(['id', 'locationName', 'issueType', 'description', 'status']) &&
+        data.id is string && isValidId(data.id) &&
+        data.locationName is string && data.locationName.size() >= 2 && data.locationName.size() <= 200 &&
+        data.issueType in ['missing_location', 'wrong_pin', 'wrong_name', 'blocked_path', 'incorrect_directions', 'other'] &&
+        data.description is string && data.description.size() >= 5 && data.description.size() <= 1500 &&
+        data.status in ['pending', 'resolved', 'dismissed'] &&
+        (!('reporterRole' in data) || data.reporterRole in ['student', 'lecturer', 'staff', 'visitor']) &&
+        (!('reporterUid' in data) || (data.reporterUid is string && data.reporterUid.size() <= 128));
+    }
+
+    function isValidNotice(data) {
+      return data.keys().hasAll(['id', 'title', 'message', 'type', 'active']) &&
+        data.id is string && isValidId(data.id) &&
+        data.title is string && data.title.size() >= 3 && data.title.size() <= 200 &&
+        data.message is string && data.message.size() >= 5 && data.message.size() <= 2000 &&
+        data.type in ['warning', 'info', 'critical', 'event'] &&
+        data.active is bool;
+    }
+
+    function isValidLocation(data) {
+      return data.keys().hasAll(['id', 'name', 'category', 'lat', 'lng']) &&
+        data.id is string && isValidId(data.id) &&
+        data.name is string && data.name.size() >= 2 && data.name.size() <= 150 &&
+        data.lat is number && data.lat >= 7.33 && data.lat <= 7.37 &&
+        data.lng is number && data.lng >= -2.36 && data.lng <= -2.32 &&
+        data.category in ['lecture_hall', 'lab', 'hostel', 'office', 'library', 'cafeteria', 'sports', 'gate', 'washroom', 'atm', 'health', 'landmark'] &&
+        (!('shortCode' in data) || (data.shortCode is string && data.shortCode.size() <= 20)) &&
+        (!('description' in data) || (data.description is string && data.description.size() <= 1000));
+    }
+
+    // =========================================================================
+    // GLOBAL CATCH-ALL SAFETY NET (Default Deny)
+    // =========================================================================
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // =========================================================================
+    // 1. USERS COLLECTION & SUBCOLLECTIONS
+    // =========================================================================
+    match /users/{userId} {
+      // Cross-user read is DENIED; only the account owner or verified admin can read
+      allow read: if isOwner(userId) || isAdmin();
+
+      // User profile creation: user can create their own profile
+      // Cannot set themselves as admin unless already verified as admin
+      allow create: if isOwner(userId) &&
+        isValidId(userId) &&
+        isValidUser(request.resource.data) &&
+        request.resource.data.uid == userId &&
+        request.resource.data.email == request.auth.token.email &&
+        (!('role' in request.resource.data) || request.resource.data.role != 'admin' || isAdmin());
+
+      // User profile update: user cannot modify 'role', 'uid', or 'email'
+      // Cannot elevate their own privileges
+      allow update: if (isOwner(userId) &&
+        isValidId(userId) &&
+        isValidUser(request.resource.data) &&
+        !request.resource.data.diff(resource.data).affectedKeys().hasAny(['role', 'uid', 'email'])) ||
+        isAdmin();
+
+      allow delete: if isAdmin();
+
+      // User favorites subcollection: strictly isolated to document owner
+      match /favorites/{placeId} {
+        allow read: if isOwner(userId);
+        allow create, update: if isOwner(userId) && isValidId(userId) && isValidId(placeId) && isValidFavorite(request.resource.data);
+        allow delete: if isOwner(userId) && isValidId(userId) && isValidId(placeId);
+      }
+    }
+
+    // =========================================================================
+    // 2. STUDENT ISSUE REPORTS
+    // =========================================================================
+    match /reports/{reportId} {
+      // Admins read all; authenticated reporters read their own reports only
+      allow read: if isAdmin() || (isAuthenticated() && resource.data.reporterUid == request.auth.uid);
+
+      // Anyone (student, staff, or visitor) can report a facility issue
+      // Must start with 'pending' status; cannot create already-resolved reports
+      allow create: if isValidId(reportId) &&
+        isValidReport(request.resource.data) &&
+        request.resource.data.status == 'pending';
+
+      // Only administrators can resolve or dismiss reports, or delete them
+      allow update: if isAdmin() && isValidReport(request.resource.data);
+      allow delete: if isAdmin();
+    }
+
+    // =========================================================================
+    // 3. CAMPUS NOTICES & ALERTS
+    // =========================================================================
+    match /notices/{noticeId} {
+      // Public can read active alerts; admins can read all
+      allow read: if (resource.data.active == true) || isAdmin();
+
+      // Only administrators can create, update, toggle, or delete notices
+      allow create, update: if isAdmin() && isValidId(noticeId) && isValidNotice(request.resource.data);
+      allow delete: if isAdmin();
+    }
+
+    // =========================================================================
+    // 4. CAMPUS LOCATIONS (Interactive Map Catalog)
+    // =========================================================================
+    match /campusLocations/{locationId} {
+      // Public can read all campus map points
+      allow read: if true;
+
+      // Only administrators can add, edit, or delete campus coordinates
+      allow create, update: if isAdmin() && isValidId(locationId) && isValidLocation(request.resource.data);
+      allow delete: if isAdmin();
+    }
+  }
+}

@@ -1,0 +1,628 @@
+import express, { Request, Response, NextFunction } from 'express';
+import crypto from 'crypto';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import { initializeApp, getApps, cert } from 'firebase-admin/app';
+import { getAuth } from 'firebase-admin/auth';
+import { INITIAL_CAMPUS_LOCATIONS } from './src/data/campusLocations';
+import { CampusLocation, CampusNotice, CampusReport } from './src/types/campus';
+import configJson from './firebase-applet-config.json';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+const app = express();
+const PORT = process.env.PORT || 3000;
+const IS_PROD = process.env.NODE_ENV === 'production';
+
+// Initialize Firebase Admin SDK
+if (!getApps().length) {
+  try {
+    if (process.env.FIREBASE_SERVICE_ACCOUNT_KEY) {
+      const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_KEY);
+      initializeApp({
+        credential: cert(serviceAccount),
+        projectId: configJson.projectId,
+      });
+    } else {
+      initializeApp({
+        projectId: configJson.projectId,
+      });
+    }
+    console.log(`Firebase Admin initialized for project: ${configJson.projectId}`);
+  } catch (err) {
+    console.warn('Firebase Admin SDK initialization notice:', err);
+  }
+}
+
+// Cryptographic Secret for Admin Session Signing
+const SESSION_SECRET = process.env.SESSION_SECRET || 'uenr-nav-secure-session-key-2026-prod';
+const ADMIN_EMAIL = process.env.ADMIN_EMAIL || 'admin@uenr.edu.gh';
+const RUNTIME_ADMIN_EMAIL = 'ushersincoperated@gmail.com';
+const ADMIN_PASSWORD_HASH = process.env.ADMIN_PASSWORD_HASH
+  ? process.env.ADMIN_PASSWORD_HASH
+  : process.env.ADMIN_PASSWORD
+  ? crypto.createHash('sha256').update(process.env.ADMIN_PASSWORD).digest('hex')
+  : null;
+
+// In-Memory Data Stores (can be plugged into PostgreSQL / Cloud SQL or SQLite)
+let campusLocations: CampusLocation[] = [...INITIAL_CAMPUS_LOCATIONS];
+
+let campusReports: CampusReport[] = [
+  {
+    id: 'rep-1',
+    locationName: 'GETFund Hostel',
+    issueType: 'wrong_pin',
+    description: 'Hostel entrance pin is 20 meters west of actual security booth.',
+    reporterRole: 'student',
+    date: '2026-10-20',
+    status: 'pending',
+  },
+  {
+    id: 'rep-2',
+    locationName: 'Odum Block',
+    issueType: 'blocked_path',
+    description: 'Construction equipment blocking the southern wheelchair ramp.',
+    reporterRole: 'student',
+    date: '2026-10-22',
+    status: 'resolved',
+  },
+];
+
+let campusNotices: CampusNotice[] = [
+  {
+    id: 'notice-1',
+    title: 'Matriculation Ceremony at BoG Auditorium',
+    message:
+      'Bank of Ghana Auditorium is reserved today for the Matriculation Ceremony. Please use the West walkway.',
+    type: 'event',
+    postedDate: 'Today',
+    active: true,
+  },
+  {
+    id: 'notice-2',
+    title: 'Pedestrian Walkway Paving near Odum Block',
+    message:
+      'Pathway renovation in progress between Odum Block and LT Block. Caution advised; detour available via School Field avenue.',
+    type: 'warning',
+    postedDate: 'Yesterday',
+    active: true,
+  },
+];
+
+// Security & Parsing Middlewares
+app.use(express.json({ limit: '1mb' }));
+
+// Custom Rate Limiting in memory
+interface RateLimitBucket {
+  count: number;
+  resetAt: number;
+}
+const rateLimitStore = new Map<string, RateLimitBucket>();
+
+function rateLimiter(maxRequests: number, windowMs: number) {
+  return (req: Request, res: Response, next: NextFunction) => {
+    const ip = req.ip || req.socket.remoteAddress || 'unknown';
+    const now = Date.now();
+    let bucket = rateLimitStore.get(ip);
+
+    if (!bucket || bucket.resetAt < now) {
+      bucket = { count: 1, resetAt: now + windowMs };
+      rateLimitStore.set(ip, bucket);
+      return next();
+    }
+
+    bucket.count++;
+    if (bucket.count > maxRequests) {
+      const waitSec = Math.ceil((bucket.resetAt - now) / 1000);
+      return res.status(429).json({
+        error: `Rate limit exceeded. Please wait ${waitSec} seconds before retrying.`,
+      });
+    }
+
+    next();
+  };
+}
+
+// Security Headers Middleware
+app.use((_req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  next();
+});
+
+// Cryptographic Token Generation & Verification
+function generateAdminToken(email: string): string {
+  const payload = JSON.stringify({ email, timestamp: Date.now() });
+  const b64 = Buffer.from(payload).toString('base64url');
+  const signature = crypto.createHmac('sha256', SESSION_SECRET).update(b64).digest('base64url');
+  return `${b64}.${signature}`;
+}
+
+function verifyAdminToken(token: string | undefined): boolean {
+  if (!token) return false;
+  const parts = token.split('.');
+  if (parts.length !== 2) return false;
+  const [b64, signature] = parts;
+  const expectedSig = crypto.createHmac('sha256', SESSION_SECRET).update(b64).digest('base64url');
+  if (signature !== expectedSig) return false;
+
+  try {
+    const payload = JSON.parse(Buffer.from(b64, 'base64url').toString('utf8'));
+    // Token valid for 24 hours
+    if (Date.now() - payload.timestamp > 24 * 60 * 60 * 1000) {
+      return false;
+    }
+    return payload.email === ADMIN_EMAIL;
+  } catch {
+    return false;
+  }
+}
+
+// Authentication Guard Middleware (Supports Firebase ID Tokens & Cryptographic HMAC)
+async function requireAdminAuth(req: Request, res: Response, next: NextFunction) {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return res.status(401).json({ error: 'Unauthorized. Admin credentials or ID token required.' });
+  }
+
+  const token = authHeader.split(' ')[1];
+
+  // 1. Verify via Firebase Admin SDK
+  try {
+    const auth = getAuth();
+    const decoded = await auth.verifyIdToken(token);
+
+    // Verify admin custom claim OR verified institutional/runtime admin email
+    const isEmailVerified = decoded.email_verified === true;
+    const isVerifiedAdminEmail =
+      isEmailVerified &&
+      (decoded.email?.toLowerCase() === ADMIN_EMAIL.toLowerCase() ||
+       decoded.email?.toLowerCase() === RUNTIME_ADMIN_EMAIL.toLowerCase());
+
+    const isFirebaseAdmin =
+      decoded.admin === true ||
+      decoded.role === 'admin' ||
+      isVerifiedAdminEmail;
+
+    if (isFirebaseAdmin) {
+      if (isVerifiedAdminEmail && decoded.admin !== true) {
+        auth.setCustomUserClaims(decoded.uid, { admin: true, role: 'admin' }).catch(() => {});
+      }
+      (req as any).user = decoded;
+      return next();
+    }
+  } catch (err: any) {
+    // If not a valid Firebase ID Token, check cryptographic HMAC session token if enabled
+    if (ADMIN_PASSWORD_HASH && verifyAdminToken(token)) {
+      return next();
+    }
+    return res.status(401).json({ error: 'Invalid, expired, or malformed authentication token.' });
+  }
+
+  return res.status(403).json({ error: 'Forbidden. Verified administrator privileges required.' });
+}
+
+// Input Sanitization Helper
+function sanitizeString(str: any): string {
+  if (typeof str !== 'string') return '';
+  return str.replace(/[<>]/g, '').trim();
+}
+
+// Coordinate Bounds Validation for UENR Campus
+function isValidCampusCoordinate(lat: number, lng: number): boolean {
+  return (
+    typeof lat === 'number' &&
+    typeof lng === 'number' &&
+    !isNaN(lat) &&
+    !isNaN(lng) &&
+    lat >= 7.33 &&
+    lat <= 7.37 &&
+    lng >= -2.36 &&
+    lng <= -2.32
+  );
+}
+
+/* ==========================================================================
+   API ROUTES
+   ========================================================================== */
+
+// 1. Health & Status
+app.get('/api/health', (_req, res) => {
+  res.json({
+    status: 'ok',
+    service: 'UENR Nav Core API',
+    campus: 'University of Energy and Natural Resources (Sunyani)',
+    timestamp: new Date().toISOString(),
+  });
+});
+
+// 2. Authentication Login (Rate Limited: max 5 tries per 10 mins)
+app.post('/api/auth/login', rateLimiter(5, 10 * 60 * 1000), (req, res) => {
+  if (!ADMIN_PASSWORD_HASH) {
+    return res.status(403).json({
+      error: 'Legacy password login is disabled. Please authenticate using Firebase Authentication.',
+    });
+  }
+
+  const { email, password } = req.body;
+
+  if (!email || !password) {
+    return res.status(400).json({ error: 'Email and password are required.' });
+  }
+
+  const incomingHash = crypto.createHash('sha256').update(String(password)).digest('hex');
+
+  // Timing-safe comparison to prevent side-channel timing attacks
+  const isEmailMatch = email.trim().toLowerCase() === ADMIN_EMAIL.toLowerCase();
+  const isPassMatch =
+    incomingHash.length === ADMIN_PASSWORD_HASH.length &&
+    crypto.timingSafeEqual(Buffer.from(incomingHash), Buffer.from(ADMIN_PASSWORD_HASH));
+
+  if (!isEmailMatch || !isPassMatch) {
+    return res.status(401).json({ error: 'Invalid administrator credentials.' });
+  }
+
+  const token = generateAdminToken(email);
+  return res.json({
+    token,
+    user: {
+      email: ADMIN_EMAIL,
+      role: 'campus_admin',
+    },
+  });
+});
+
+// 3. Verify Token
+app.get('/api/auth/verify', (req, res) => {
+  const authHeader = req.headers.authorization;
+  const token = authHeader && authHeader.startsWith('Bearer ') ? authHeader.split(' ')[1] : undefined;
+  const isValid = verifyAdminToken(token);
+  res.json({ valid: isValid, email: isValid ? ADMIN_EMAIL : null });
+});
+
+// 4. Locations Endpoints
+app.get('/api/locations', (_req, res) => {
+  res.json(campusLocations);
+});
+
+app.post('/api/locations', requireAdminAuth, (req, res) => {
+  const {
+    name,
+    shortCode,
+    aliases,
+    category,
+    lat,
+    lng,
+    description,
+    openingHours,
+    accessibility,
+    verificationStatus,
+    facilities,
+  } = req.body;
+
+  if (!name || typeof lat !== 'number' || typeof lng !== 'number') {
+    return res.status(400).json({ error: 'Name, valid latitude, and longitude are required.' });
+  }
+
+  if (!isValidCampusCoordinate(lat, lng)) {
+    return res.status(400).json({
+      error:
+        'Coordinates are outside the UENR campus boundary (Latitude: 7.33 - 7.37, Longitude: -2.36 - -2.32).',
+    });
+  }
+
+  const newLocation: CampusLocation = {
+    id: `loc-${Date.now()}`,
+    name: sanitizeString(name),
+    shortCode: sanitizeString(shortCode) || 'CAMP',
+    aliases: Array.isArray(aliases) ? aliases.map(sanitizeString) : [],
+    category: category || 'lecture_hall',
+    lat,
+    lng,
+    description: sanitizeString(description),
+    openingHours: sanitizeString(openingHours),
+    accessibility: sanitizeString(accessibility) || 'Standard campus access',
+    verificationStatus: verificationStatus === 'verified' ? 'verified' : 'pending_verification',
+    lastVerified: new Date().toISOString().split('T')[0],
+    facilities: Array.isArray(facilities) ? facilities.map(sanitizeString) : ['Standard Facilities'],
+    isCustomAdded: true,
+  };
+
+  campusLocations.unshift(newLocation);
+  res.status(201).json(newLocation);
+});
+
+app.put('/api/locations/:id', requireAdminAuth, (req, res) => {
+  const { id } = req.params;
+  const index = campusLocations.findIndex((l) => l.id === id);
+
+  if (index === -1) {
+    return res.status(404).json({ error: 'Location not found.' });
+  }
+
+  const existing = campusLocations[index];
+  const {
+    name,
+    shortCode,
+    aliases,
+    category,
+    lat,
+    lng,
+    description,
+    openingHours,
+    accessibility,
+    verificationStatus,
+    facilities,
+  } = req.body;
+
+  if (lat !== undefined && lng !== undefined && !isValidCampusCoordinate(lat, lng)) {
+    return res.status(400).json({
+      error: 'Coordinates outside UENR campus boundary.',
+    });
+  }
+
+  const updated: CampusLocation = {
+    ...existing,
+    name: name !== undefined ? sanitizeString(name) : existing.name,
+    shortCode: shortCode !== undefined ? sanitizeString(shortCode) : existing.shortCode,
+    aliases: Array.isArray(aliases) ? aliases.map(sanitizeString) : existing.aliases,
+    category: category || existing.category,
+    lat: typeof lat === 'number' ? lat : existing.lat,
+    lng: typeof lng === 'number' ? lng : existing.lng,
+    description: description !== undefined ? sanitizeString(description) : existing.description,
+    openingHours: openingHours !== undefined ? sanitizeString(openingHours) : existing.openingHours,
+    accessibility: accessibility !== undefined ? sanitizeString(accessibility) : existing.accessibility,
+    verificationStatus:
+      verificationStatus === 'verified'
+        ? 'verified'
+        : verificationStatus === 'pending_verification'
+        ? 'pending_verification'
+        : existing.verificationStatus,
+    lastVerified: new Date().toISOString().split('T')[0],
+    facilities: Array.isArray(facilities) ? facilities.map(sanitizeString) : existing.facilities,
+  };
+
+  campusLocations[index] = updated;
+  res.json(updated);
+});
+
+app.delete('/api/locations/:id', requireAdminAuth, (req, res) => {
+  const { id } = req.params;
+  const initialLength = campusLocations.length;
+  campusLocations = campusLocations.filter((l) => l.id !== id);
+
+  if (campusLocations.length === initialLength) {
+    return res.status(404).json({ error: 'Location not found.' });
+  }
+
+  res.json({ success: true, message: 'Location deleted successfully.' });
+});
+
+// 5. Student Issue Reports Endpoints
+app.get('/api/reports', requireAdminAuth, (_req, res) => {
+  res.json(campusReports);
+});
+
+// Public rate-limited submission
+app.post('/api/reports', rateLimiter(10, 10 * 60 * 1000), (req, res) => {
+  const { locationName, issueType, description, reporterRole, locationId } = req.body;
+
+  if (!locationName || !description) {
+    return res.status(400).json({ error: 'Location name and description are required.' });
+  }
+
+  const cleanDescription = sanitizeString(description);
+  if (cleanDescription.length < 5 || cleanDescription.length > 1000) {
+    return res.status(400).json({ error: 'Description must be between 5 and 1000 characters.' });
+  }
+
+  const validIssueTypes = [
+    'missing_location',
+    'wrong_pin',
+    'wrong_name',
+    'blocked_path',
+    'incorrect_directions',
+    'other',
+  ];
+
+  const cleanIssueType = validIssueTypes.includes(issueType) ? issueType : 'other';
+
+  const newReport: CampusReport = {
+    id: `rep-${Date.now()}`,
+    locationId: locationId ? sanitizeString(locationId) : undefined,
+    locationName: sanitizeString(locationName),
+    issueType: cleanIssueType as any,
+    description: cleanDescription,
+    reporterRole: ['student', 'lecturer', 'staff', 'visitor'].includes(reporterRole)
+      ? reporterRole
+      : 'student',
+    date: new Date().toISOString().split('T')[0],
+    status: 'pending',
+  };
+
+  campusReports.unshift(newReport);
+  res.status(201).json(newReport);
+});
+
+app.patch('/api/reports/:id', requireAdminAuth, (req, res) => {
+  const { id } = req.params;
+  const { status } = req.body;
+
+  if (!['pending', 'resolved', 'dismissed'].includes(status)) {
+    return res.status(400).json({ error: 'Invalid report status.' });
+  }
+
+  const report = campusReports.find((r) => r.id === id);
+  if (!report) {
+    return res.status(404).json({ error: 'Report not found.' });
+  }
+
+  report.status = status;
+  res.json(report);
+});
+
+// 6. Campus Notices Endpoints
+app.get('/api/notices', (_req, res) => {
+  res.json(campusNotices);
+});
+
+app.post('/api/notices', requireAdminAuth, (req, res) => {
+  const { title, message, type } = req.body;
+
+  if (!title || !message) {
+    return res.status(400).json({ error: 'Title and message are required.' });
+  }
+
+  const newNotice: CampusNotice = {
+    id: `notice-${Date.now()}`,
+    title: sanitizeString(title),
+    message: sanitizeString(message),
+    type: ['warning', 'info', 'critical', 'event'].includes(type) ? type : 'info',
+    postedDate: 'Just now',
+    active: true,
+  };
+
+  campusNotices.unshift(newNotice);
+  res.status(201).json(newNotice);
+});
+
+app.patch('/api/notices/:id', requireAdminAuth, (req, res) => {
+  const { id } = req.params;
+  const notice = campusNotices.find((n) => n.id === id);
+
+  if (!notice) {
+    return res.status(404).json({ error: 'Notice not found.' });
+  }
+
+  if (typeof req.body.active === 'boolean') {
+    notice.active = req.body.active;
+  }
+
+  res.json(notice);
+});
+
+app.delete('/api/notices/:id', requireAdminAuth, (req, res) => {
+  const { id } = req.params;
+  const initial = campusNotices.length;
+  campusNotices = campusNotices.filter((n) => n.id !== id);
+
+  if (campusNotices.length === initial) {
+    return res.status(404).json({ error: 'Notice not found.' });
+  }
+
+  res.json({ success: true });
+});
+
+// 7. Server-Side Custom Claims & Role Assignment
+app.post('/api/admin/set-role', requireAdminAuth, async (req, res) => {
+  const { targetUid, role } = req.body;
+  if (!targetUid || !role) {
+    return res.status(400).json({ error: 'targetUid and role are required.' });
+  }
+
+  // Strict input validation to prevent arbitrary inputs
+  if (typeof targetUid !== 'string' || !/^[a-zA-Z0-9_\-]{1,128}$/.test(targetUid)) {
+    return res.status(400).json({ error: 'Invalid targetUid format. Must be an alphanumeric UID.' });
+  }
+
+  const ALLOWED_ROLES = ['admin', 'lecturer', 'staff', 'student', 'visitor'];
+  if (!ALLOWED_ROLES.includes(role)) {
+    return res.status(400).json({
+      error: `Invalid role. Allowed roles are: ${ALLOWED_ROLES.join(', ')}.`,
+    });
+  }
+
+  const isAdminRole = role === 'admin';
+
+  try {
+    await getAuth().setCustomUserClaims(targetUid, {
+      admin: isAdminRole,
+      role,
+    });
+    return res.json({ success: true, message: `Role '${role}' assigned to user ${targetUid}.` });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message || 'Failed to update custom claims.' });
+  }
+});
+
+// 8. Secure One-Time Administrator Bootstrap Endpoint
+app.post('/api/admin/bootstrap-admin', async (req, res) => {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return res.status(401).json({ error: 'Bearer ID token required for administrator bootstrap.' });
+  }
+
+  const token = authHeader.split(' ')[1];
+
+  try {
+    const auth = getAuth();
+    const decoded = await auth.verifyIdToken(token);
+
+    const isEmailVerified = decoded.email_verified === true;
+    const isAuthorizedEmail =
+      isEmailVerified &&
+      (decoded.email?.toLowerCase() === ADMIN_EMAIL.toLowerCase() ||
+       decoded.email?.toLowerCase() === RUNTIME_ADMIN_EMAIL.toLowerCase());
+
+    const bootstrapSecret = req.headers['x-bootstrap-secret'] || req.body?.bootstrapSecret;
+    const isSecretValid =
+      process.env.BOOTSTRAP_SECRET &&
+      bootstrapSecret === process.env.BOOTSTRAP_SECRET;
+
+    if (!isAuthorizedEmail && !isSecretValid) {
+      return res.status(403).json({
+        error:
+          'Forbidden. Bootstrap requires a verified administrator email (e.g. ' +
+          ADMIN_EMAIL +
+          ') or authorized server secret.',
+      });
+    }
+
+    await auth.setCustomUserClaims(decoded.uid, {
+      admin: true,
+      role: 'admin',
+    });
+
+    return res.json({
+      success: true,
+      message: `Administrator privileges successfully granted to user ${decoded.uid} (${decoded.email}).`,
+    });
+  } catch (err: any) {
+    return res.status(401).json({ error: 'Invalid or expired authentication token.' });
+  }
+});
+
+/* ==========================================================================
+   FRONTEND SERVING (Dev Vite Middleware & Production Static)
+   ========================================================================== */
+
+export async function startServer() {
+  if (!IS_PROD) {
+    // Mount Vite middleware in development
+    const { createServer } = await import('vite');
+    const vite = await createServer({
+      server: { middlewareMode: true, port: Number(PORT) },
+      appType: 'spa',
+    });
+    app.use(vite.middlewares);
+  } else {
+    // Serve static frontend assets from dist in production
+    app.use(express.static(path.resolve(__dirname, 'dist')));
+    app.get('*', (_req, res) => {
+      res.sendFile(path.resolve(__dirname, 'dist', 'index.html'));
+    });
+  }
+
+  app.listen(PORT, () => {
+    console.log(`UENR Nav Server running on port ${PORT} [Mode: ${IS_PROD ? 'production' : 'development'}]`);
+  });
+}
+
+// Automatically start if executed as main file
+if (process.env.NODE_ENV !== 'test') {
+  startServer();
+}
+
+export default app;
