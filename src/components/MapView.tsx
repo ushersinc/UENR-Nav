@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import L from 'leaflet';
 import { CampusLocation, RouteInfo } from '../types/campus';
-import { CATEGORY_METAS, CAMPUS_CENTER } from '../data/campusLocations';
+import { CATEGORY_METAS, CAMPUS_CENTER, CAMPUS_BOUNDS } from '../data/campusLocations';
 import {
   Locate,
   Layers,
@@ -12,6 +12,8 @@ import {
   Compass,
   AlertTriangle,
   Sparkles,
+  CheckCircle2,
+  ShieldCheck,
 } from 'lucide-react';
 
 interface MapViewProps {
@@ -47,7 +49,7 @@ export const MapView: React.FC<MapViewProps> = ({
 
   const [activeLayer, setActiveLayer] = useState<'streets' | 'satellite'>('streets');
   const [isLocating, setIsLocating] = useState(false);
-  const [mapZoom, setMapZoom] = useState(16);
+  const [mapZoom, setMapZoom] = useState(17);
 
   // Tile layer URLs
   const streetTilesRef = useRef<L.TileLayer | null>(null);
@@ -57,12 +59,18 @@ export const MapView: React.FC<MapViewProps> = ({
   useEffect(() => {
     if (!mapContainerRef.current || mapInstanceRef.current) return;
 
+    const southWest = L.latLng(CAMPUS_BOUNDS[0][0], CAMPUS_BOUNDS[0][1]);
+    const northEast = L.latLng(CAMPUS_BOUNDS[1][0], CAMPUS_BOUNDS[1][1]);
+    const maxBounds = L.latLngBounds(southWest, northEast).pad(0.35);
+
     const map = L.map(mapContainerRef.current, {
       center: [CAMPUS_CENTER.lat, CAMPUS_CENTER.lng],
       zoom: CAMPUS_CENTER.zoom,
-      minZoom: 14,
+      minZoom: 15,
       maxZoom: 19,
-      zoomControl: false, // We render custom ergonomic controls
+      maxBounds: maxBounds,
+      maxBoundsViscosity: 0.8,
+      zoomControl: false,
       attributionControl: false,
     });
 
@@ -95,7 +103,7 @@ export const MapView: React.FC<MapViewProps> = ({
 
     streetTilesRef.current.addTo(map);
 
-    // Layer groups for markers and routes
+    // Layer groups for markers, routes, user position
     markersLayerRef.current = L.layerGroup().addTo(map);
     routeLayerRef.current = L.featureGroup().addTo(map);
     userMarkerRef.current = L.layerGroup().addTo(map);
@@ -112,7 +120,32 @@ export const MapView: React.FC<MapViewProps> = ({
 
     mapInstanceRef.current = map;
 
+    // Invalidate map size after initial paint to prevent grey patches
+    const initTimer = setTimeout(() => {
+      map.invalidateSize();
+    }, 150);
+
+    // ResizeObserver to automatically invalidate size when container or drawers resize
+    const resizeObserver = new ResizeObserver(() => {
+      if (mapInstanceRef.current) {
+        mapInstanceRef.current.invalidateSize();
+      }
+    });
+    if (mapContainerRef.current) {
+      resizeObserver.observe(mapContainerRef.current);
+    }
+
+    const handleWindowResize = () => {
+      if (mapInstanceRef.current) {
+        mapInstanceRef.current.invalidateSize();
+      }
+    };
+    window.addEventListener('resize', handleWindowResize);
+
     return () => {
+      clearTimeout(initTimer);
+      resizeObserver.disconnect();
+      window.removeEventListener('resize', handleWindowResize);
       map.remove();
       mapInstanceRef.current = null;
     };
@@ -144,6 +177,7 @@ export const MapView: React.FC<MapViewProps> = ({
       const meta = CATEGORY_METAS[loc.category];
       const isSelected = selectedLocation?.id === loc.id;
       const color = meta ? meta.color : '#176B45';
+      const isNeedsReview = loc.verificationStatus === 'needs_review' || loc.verificationStatus === 'pending_verification';
 
       // Custom HTML Pin icon
       const iconHtml = `
@@ -161,8 +195,13 @@ export const MapView: React.FC<MapViewProps> = ({
             <svg class="w-4 h-4 fill-white" viewBox="0 0 24 24">
               <path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5c-1.38 0-2.5-1.12-2.5-2.5s1.12-2.5 2.5-2.5 2.5 1.12 2.5 2.5-1.12 2.5-2.5 2.5z"/>
             </svg>
+            ${
+              isNeedsReview
+                ? `<div class="absolute -top-1 -right-1 w-3.5 h-3.5 bg-amber-500 rounded-full border border-white flex items-center justify-center text-[9px] font-bold text-white shadow">!</div>`
+                : ''
+            }
           </div>
-          <div class="absolute -bottom-5 left-1/2 -translate-x-1/2 whitespace-nowrap px-1.5 py-0.5 rounded bg-white/90 backdrop-blur-sm text-[10px] font-bold text-[#263238] shadow-sm border border-black/10 pointer-events-none transition-opacity ${
+          <div class="absolute -bottom-5 left-1/2 -translate-x-1/2 whitespace-nowrap px-1.5 py-0.5 rounded bg-white/95 backdrop-blur-sm text-[10px] font-bold text-[#263238] shadow-sm border border-black/10 pointer-events-none transition-opacity ${
             isSelected || mapZoom >= 17 ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'
           }">
             ${loc.shortCode || loc.name}
@@ -195,7 +234,7 @@ export const MapView: React.FC<MapViewProps> = ({
     if (!map || !selectedLocation) return;
 
     map.flyTo([selectedLocation.lat, selectedLocation.lng], 18, {
-      duration: 1.2,
+      duration: 1.0,
       easeLinearity: 0.25,
     });
   }, [selectedLocation]);
@@ -262,11 +301,12 @@ export const MapView: React.FC<MapViewProps> = ({
       });
       routeLayer.addLayer(underGlow);
 
-      // Primary Route Polyline
+      // Primary Route Polyline (dashed if estimated approach)
       const polyline = L.polyline(route.coordinates, {
         color: '#176B45',
         weight: 5,
         opacity: 0.95,
+        dashArray: route.isEstimatedRoute ? '8, 8' : undefined,
         lineCap: 'round',
         lineJoin: 'round',
         className: 'route-walking-line',
@@ -326,7 +366,7 @@ export const MapView: React.FC<MapViewProps> = ({
         onUserLocationFound(coords, pos.coords.accuracy);
 
         if (mapInstanceRef.current) {
-          mapInstanceRef.current.flyTo(coords, 17, { duration: 1 });
+          mapInstanceRef.current.flyTo(coords, 18, { duration: 1 });
         }
       },
       (err) => {
@@ -381,7 +421,7 @@ export const MapView: React.FC<MapViewProps> = ({
         <button
           onClick={() => setActiveLayer(activeLayer === 'streets' ? 'satellite' : 'streets')}
           className="p-2.5 bg-white text-[#263238] rounded-xl shadow-lg border border-black/10 hover:bg-slate-50 transition-all active:scale-95 flex items-center justify-center group"
-          title={activeLayer === 'streets' ? 'Switch to Satellite' : 'Switch to Street Map'}
+          title={activeLayer === 'streets' ? 'Switch to Satellite View (Esri Imagery)' : 'Switch to Street Map (OpenStreetMap)'}
         >
           <Layers className="w-5 h-5 text-slate-700 group-hover:text-[#176B45]" />
           <span className="sr-only">Toggle Map View</span>
@@ -433,14 +473,28 @@ export const MapView: React.FC<MapViewProps> = ({
 
       {/* Map Attribution and Coordinates Bar (Bottom Left) */}
       <div className="absolute bottom-3 left-3 z-20 pointer-events-none">
-        <div className="bg-white/85 backdrop-blur-sm px-2.5 py-1 rounded-md text-[10px] text-slate-600 border border-black/5 shadow-sm hidden sm:flex items-center gap-2">
-          <span className="font-semibold text-[#176B45]">UENR Sunyani</span>
-          <span>·</span>
-          <span>7.3495° N, 2.3435° W</span>
+        <div className="bg-white/90 backdrop-blur-sm px-3 py-1.5 rounded-lg text-[11px] text-slate-700 border border-black/10 shadow-md flex items-center gap-2">
+          <span className="font-bold text-[#176B45] flex items-center gap-1">
+            <ShieldCheck className="w-3.5 h-3.5" />
+            UENR Sunyani
+          </span>
+          <span className="text-slate-300">·</span>
+          {selectedLocation ? (
+            <span className="font-mono text-slate-800">
+              {selectedLocation.name}: {selectedLocation.lat.toFixed(5)}° N, {Math.abs(selectedLocation.lng).toFixed(5)}° W
+            </span>
+          ) : (
+            <span className="font-mono text-slate-600">
+              {CAMPUS_CENTER.lat.toFixed(4)}° N, {Math.abs(CAMPUS_CENTER.lng).toFixed(4)}° W
+            </span>
+          )}
           {userLocation && (
             <>
-              <span>·</span>
-              <span className="text-emerald-700 font-medium">GPS Active</span>
+              <span className="text-slate-300">·</span>
+              <span className="text-emerald-700 font-semibold flex items-center gap-1">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                GPS Active
+              </span>
             </>
           )}
         </div>

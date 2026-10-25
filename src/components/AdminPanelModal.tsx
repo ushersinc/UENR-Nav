@@ -17,15 +17,35 @@ import {
   MapPin,
   Save,
   Loader2,
+  Search,
+  Filter,
+  Calendar,
+  Clock,
+  Eye,
+  EyeOff,
+  Flame,
+  AlertTriangle,
+  Info,
+  CheckCheck,
 } from 'lucide-react';
-import { CampusCategory, CampusLocation, CampusNotice, CampusReport } from '../types/campus';
+import {
+  CampusCategory,
+  CampusLocation,
+  CampusNotice,
+  CampusReport,
+  NoticeCategory,
+  NoticePriority,
+  NoticeStatus,
+} from '../types/campus';
 import { CATEGORY_METAS } from '../data/campusLocations';
 import { useAuth } from '../context/AuthContext';
+import { calculateDistanceMeters } from '../services/routingService';
 import {
   saveLocationToServer,
   deleteLocationOnServer,
   updateReportStatus,
   createNoticeOnServer,
+  updateNoticeOnServer,
   toggleNoticeOnServer,
   deleteNoticeOnServer,
   resetLocationsToDefault,
@@ -58,63 +78,115 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
     currentUser,
     userProfile,
     isAdmin,
-    login,
+    signInWithGoogle,
     logout,
     loading: authLoading,
     getIdToken,
     refreshAuthToken,
   } = useAuth();
-  const [adminEmail, setAdminEmail] = useState('');
-  const [adminPassword, setAdminPassword] = useState('');
   const [authError, setAuthError] = useState('');
+  const [bootstrapSuccess, setBootstrapSuccess] = useState('');
+  const [bootstrapSecret, setBootstrapSecret] = useState('');
   const [isLoggingIn, setIsLoggingIn] = useState(false);
   const [actionLoading, setActionLoading] = useState(false);
 
   const [activeTab, setActiveTab] = useState<'locations' | 'reports' | 'notices' | 'import_export'>('locations');
   const [editingLocation, setEditingLocation] = useState<CampusLocation | null>(null);
   const [isAddingNew, setIsAddingNew] = useState(false);
+  const [searchFilter, setSearchFilter] = useState('');
+  const [statusFilter, setStatusFilter] = useState<'all' | 'verified' | 'needs_review' | 'unverified'>('all');
 
-  // New location form state
+  // Location form state
   const [formName, setFormName] = useState('');
   const [formShortCode, setFormShortCode] = useState('');
   const [formAliases, setFormAliases] = useState('');
   const [formCategory, setFormCategory] = useState<CampusCategory>('lecture_hall');
-  const [formLat, setFormLat] = useState('7.3495');
-  const [formLng, setFormLng] = useState('-2.3435');
+  const [formLat, setFormLat] = useState('7.3502');
+  const [formLng, setFormLng] = useState('-2.3425');
   const [formDescription, setFormDescription] = useState('');
   const [formHours, setFormHours] = useState('Mon - Fri: 8:00 AM - 5:00 PM');
   const [formAccessibility, setFormAccessibility] = useState('Wheelchair accessible entrance');
-  const [formVerified, setFormVerified] = useState(true);
+  const [formVerificationStatus, setFormVerificationStatus] = useState<CampusLocation['verificationStatus']>('verified');
+  const [formSource, setFormSource] = useState('OpenStreetMap Verified Node/Way');
 
-  // Notice form state
+  // Announcement form & filter state
+  const [editingNotice, setEditingNotice] = useState<CampusNotice | null>(null);
   const [noticeTitle, setNoticeTitle] = useState('');
   const [noticeMessage, setNoticeMessage] = useState('');
-  const [noticeType, setNoticeType] = useState<CampusNotice['type']>('warning');
+  const [noticeCategory, setNoticeCategory] = useState<NoticeCategory>('General');
+  const [noticePriority, setNoticePriority] = useState<NoticePriority>('Normal');
+  const [noticeStatus, setNoticeStatus] = useState<NoticeStatus>('published');
+  const [noticeLocationId, setNoticeLocationId] = useState('');
+  const [noticeScheduledAt, setNoticeScheduledAt] = useState('');
+  const [noticeExpiresAt, setNoticeExpiresAt] = useState('');
+  const [noticeStartTime, setNoticeStartTime] = useState('');
+  const [noticeEndTime, setNoticeEndTime] = useState('');
+  const [isPreviewingNotice, setIsPreviewingNotice] = useState(false);
+  const [noticeFilterStatus, setNoticeFilterStatus] = useState<'all' | 'published' | 'scheduled' | 'draft' | 'archived'>('all');
 
   if (!isOpen) return null;
 
-  const handleLogin = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleGoogleAdminSignIn = async () => {
     setAuthError('');
+    setBootstrapSuccess('');
     setIsLoggingIn(true);
 
     try {
-      await login(adminEmail, adminPassword);
-      setAdminPassword('');
+      await signInWithGoogle();
       const token = await getIdToken();
       if (token) {
         try {
-          await fetch('/api/admin/bootstrap-admin', {
+          const res = await fetch('/api/admin/bootstrap-admin', {
             method: 'POST',
-            headers: { Authorization: `Bearer ${token}` },
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${token}`,
+            },
           });
-          await refreshAuthToken();
+          if (res.ok) {
+            await refreshAuthToken();
+          }
         } catch {
-          // ignore if user is already established or not bootstrap target
+          // Non-blocking if already set or not allowlisted
         }
       }
     } catch (err: any) {
-      setAuthError(err.message || 'Invalid administrator credentials.');
+      setAuthError(err.message || 'Google authentication failed.');
+    } finally {
+      setIsLoggingIn(false);
+    }
+  };
+
+  const handleBootstrapAdmin = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    setAuthError('');
+    setBootstrapSuccess('');
+    setIsLoggingIn(true);
+
+    try {
+      const token = await getIdToken();
+      if (!token) {
+        throw new Error('Please sign in with Google first.');
+      }
+
+      const res = await fetch('/api/admin/bootstrap-admin', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ bootstrapSecret: bootstrapSecret.trim() || undefined }),
+      });
+
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || 'Failed to grant administrator privileges.');
+      }
+
+      setBootstrapSuccess(data.message || 'Administrator privileges verified.');
+      await refreshAuthToken();
+    } catch (err: any) {
+      setAuthError(err.message || 'Administrator authorization error.');
     } finally {
       setIsLoggingIn(false);
     }
@@ -136,7 +208,8 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
     setFormDescription(loc.description);
     setFormHours(loc.openingHours || '');
     setFormAccessibility(loc.accessibility);
-    setFormVerified(loc.verificationStatus === 'verified');
+    setFormVerificationStatus(loc.verificationStatus || 'verified');
+    setFormSource(loc.source || 'OpenStreetMap Verified');
   };
 
   const handleNewClick = () => {
@@ -146,12 +219,13 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
     setFormShortCode('');
     setFormAliases('');
     setFormCategory('lecture_hall');
-    setFormLat('7.3495');
-    setFormLng('-2.3435');
+    setFormLat('7.3502');
+    setFormLng('-2.3425');
     setFormDescription('');
     setFormHours('Mon - Fri: 8:00 AM - 5:00 PM');
     setFormAccessibility('Step-free ground level access');
-    setFormVerified(true);
+    setFormVerificationStatus('verified');
+    setFormSource('OpenStreetMap Verified Node/Way');
   };
 
   const handleSaveLocation = async (e: React.FormEvent) => {
@@ -160,7 +234,7 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
     const lngNum = parseFloat(formLng);
 
     if (isNaN(latNum) || isNaN(lngNum)) {
-      alert('Coordinates must be valid decimal numbers (e.g. 7.3495 and -2.3435)');
+      alert('Coordinates must be valid decimal numbers (e.g. 7.3502 and -2.3425)');
       return;
     }
 
@@ -188,7 +262,9 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
         description: formDescription.trim(),
         openingHours: formHours.trim(),
         accessibility: formAccessibility.trim(),
-        verificationStatus: formVerified ? 'verified' : 'pending_verification',
+        verificationStatus: formVerificationStatus,
+        source: formSource.trim() || 'Admin Field Inspection',
+        lastVerified: new Date().toISOString().split('T')[0],
       };
 
       const saved = await saveLocationToServer(payload);
@@ -293,26 +369,105 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
     URL.revokeObjectURL(url);
   };
 
-  const handlePostNotice = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!noticeTitle.trim() || !noticeMessage.trim()) return;
+  const handleSaveNotice = async (overrideStatus?: NoticeStatus) => {
+    if (!noticeTitle.trim()) {
+      alert('Announcement title is required.');
+      return;
+    }
+    if (!noticeMessage.trim()) {
+      alert('Announcement message is required.');
+      return;
+    }
+
+    const finalStatus: NoticeStatus = overrideStatus || noticeStatus;
+    const loc = locations.find((l) => l.id === noticeLocationId);
 
     setActionLoading(true);
     try {
-      const created = await createNoticeOnServer({
-        title: noticeTitle.trim(),
-        message: noticeMessage.trim(),
-        type: noticeType,
-      });
+      if (editingNotice) {
+        // Update existing announcement
+        const updated = await updateNoticeOnServer(editingNotice.id, {
+          title: noticeTitle.trim(),
+          message: noticeMessage.trim(),
+          category: noticeCategory,
+          priority: noticePriority,
+          status: finalStatus,
+          affectedLocationId: noticeLocationId || undefined,
+          locationName: loc ? loc.name : undefined,
+          scheduledAt: finalStatus === 'scheduled' ? noticeScheduledAt || undefined : undefined,
+          expiresAt: noticeExpiresAt || undefined,
+          startTime: noticeStartTime || undefined,
+          endTime: noticeEndTime || undefined,
+          active: finalStatus !== 'archived',
+        });
+        onUpdateNotices(notices.map((n) => (n.id === editingNotice.id ? updated : n)));
+      } else {
+        // Create new announcement
+        const created = await createNoticeOnServer({
+          title: noticeTitle.trim(),
+          message: noticeMessage.trim(),
+          category: noticeCategory,
+          priority: noticePriority,
+          status: finalStatus,
+          affectedLocationId: noticeLocationId || undefined,
+          locationName: loc ? loc.name : undefined,
+          scheduledAt: finalStatus === 'scheduled' ? noticeScheduledAt || undefined : undefined,
+          expiresAt: noticeExpiresAt || undefined,
+          startTime: noticeStartTime || undefined,
+          endTime: noticeEndTime || undefined,
+          active: finalStatus !== 'archived',
+        });
+        onUpdateNotices([created, ...notices]);
+      }
 
-      onUpdateNotices([created, ...notices]);
+      // Reset form
+      setEditingNotice(null);
       setNoticeTitle('');
       setNoticeMessage('');
+      setNoticeCategory('General');
+      setNoticePriority('Normal');
+      setNoticeStatus('published');
+      setNoticeLocationId('');
+      setNoticeScheduledAt('');
+      setNoticeExpiresAt('');
+      setNoticeStartTime('');
+      setNoticeEndTime('');
+      setIsPreviewingNotice(false);
     } catch (err: any) {
-      alert(err.message || 'Failed to post notice.');
+      alert(err.message || 'Failed to save announcement.');
     } finally {
       setActionLoading(false);
     }
+  };
+
+  const handleEditNotice = (n: CampusNotice) => {
+    setEditingNotice(n);
+    setNoticeTitle(n.title);
+    setNoticeMessage(n.message);
+    setNoticeCategory(n.category || 'General');
+    setNoticePriority(n.priority || 'Normal');
+    setNoticeStatus(n.status || 'published');
+    setNoticeLocationId(n.affectedLocationId || '');
+    setNoticeScheduledAt(n.scheduledAt || '');
+    setNoticeExpiresAt(n.expiresAt || '');
+    setNoticeStartTime(n.startTime || '');
+    setNoticeEndTime(n.endTime || '');
+    setIsPreviewingNotice(false);
+  };
+
+  const handleCancelNoticeEdit = () => {
+    setEditingNotice(null);
+    setNoticeTitle('');
+    setNoticeMessage('');
+    setNoticeCategory('General');
+    setNoticePriority('Normal');
+    setNoticeStatus('published');
+    setNoticeLocationId('');
+    setNoticeScheduledAt('');
+    setNoticeExpiresAt('');
+    setNoticeStartTime('');
+    setNoticeEndTime('');
+    setIsPreviewingNotice(false);
   };
 
   const handleToggleNotice = async (n: CampusNotice) => {
@@ -325,9 +480,15 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
   };
 
   const handleDeleteNotice = async (id: string) => {
+    if (!confirm('Are you sure you want to permanently delete this campus announcement? This action cannot be undone.')) {
+      return;
+    }
     try {
       await deleteNoticeOnServer(id);
       onUpdateNotices(notices.filter((n) => n.id !== id));
+      if (editingNotice?.id === id) {
+        handleCancelNoticeEdit();
+      }
     } catch (err: any) {
       alert(err.message || 'Failed to delete notice.');
     }
@@ -400,75 +561,148 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
             <span className="text-xs text-slate-500">Verifying administrator authorization...</span>
           </div>
         ) : !isAdmin ? (
-          /* Authentication Form */
+          /* Google Administrator Authentication & Bootstrap View */
           <div className="p-8 sm:p-12 max-w-md mx-auto w-full space-y-4">
             <div className="text-center space-y-1">
               <div className="w-12 h-12 rounded-2xl bg-[#176B45]/10 text-[#176B45] flex items-center justify-center mx-auto mb-2">
                 <Lock className="w-6 h-6" />
               </div>
-              <h3 className="text-lg font-bold text-slate-800">Protected Administrator Access</h3>
+              <h3 className="text-lg font-bold text-slate-800">Campus Administrator Portal</h3>
               <p className="text-xs text-slate-500">
-                Please sign in with verified UENR administrator credentials.
+                Restricted to authorized UENR Campus Administrators with verified custom claims.
               </p>
             </div>
 
             {authError && (
-              <div className="p-3 rounded-xl bg-red-50 border border-red-200 text-xs text-red-700 flex items-center gap-2">
-                <AlertCircle className="w-4 h-4 shrink-0" />
-                <span>{authError}</span>
+              <div className="p-3.5 rounded-xl bg-red-50 border border-red-200 text-xs text-red-700 flex items-start gap-2">
+                <AlertCircle className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
+                <span className="flex-1">{authError}</span>
               </div>
             )}
 
-            <form onSubmit={handleLogin} className="space-y-3 text-xs sm:text-sm">
-              <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1">
-                  Institutional Admin Email
-                </label>
-                <input
-                  type="text"
-                  required
-                  value={adminEmail}
-                  onChange={(e) => setAdminEmail(e.target.value)}
-                  placeholder="admin@uenr.edu.gh"
-                  className="w-full px-3 py-2 bg-[#F5F7F4] border border-black/10 rounded-xl text-slate-800 focus:outline-none focus:ring-2 focus:ring-[#176B45]"
-                />
+            {bootstrapSuccess && (
+              <div className="p-3.5 rounded-xl bg-emerald-50 border border-emerald-200 text-xs text-emerald-800 flex items-start gap-2">
+                <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
+                <span className="flex-1">{bootstrapSuccess}</span>
               </div>
+            )}
 
-              <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1">
-                  Admin Passcode
-                </label>
-                <input
-                  type="password"
-                  required
-                  value={adminPassword}
-                  onChange={(e) => setAdminPassword(e.target.value)}
-                  placeholder="••••••••"
-                  className="w-full px-3 py-2 bg-[#F5F7F4] border border-black/10 rounded-xl text-slate-800 focus:outline-none focus:ring-2 focus:ring-[#176B45]"
-                />
+            {currentUser ? (
+              <div className="space-y-4">
+                <div className="p-4 rounded-2xl bg-slate-50 border border-slate-200 space-y-2">
+                  <div className="text-xs text-slate-500 font-medium">Currently Authenticated Account:</div>
+                  <div className="flex items-center gap-2">
+                    {userProfile?.photoURL || currentUser.photoURL ? (
+                      <img
+                        src={userProfile?.photoURL || currentUser.photoURL || ''}
+                        alt="User"
+                        className="w-8 h-8 rounded-full object-cover"
+                      />
+                    ) : (
+                      <div className="w-8 h-8 rounded-full bg-[#176B45] text-white flex items-center justify-center font-bold text-xs">
+                        {(currentUser.displayName || currentUser.email || 'U')[0].toUpperCase()}
+                      </div>
+                    )}
+                    <div className="min-w-0 flex-1">
+                      <div className="font-semibold text-xs text-slate-800 truncate">
+                        {currentUser.displayName || 'Google User'}
+                      </div>
+                      <div className="text-[11px] text-slate-500 truncate">{currentUser.email}</div>
+                    </div>
+                  </div>
+                  <div className="pt-1">
+                    <span className="text-[10px] font-semibold uppercase px-2 py-0.5 rounded bg-amber-100 text-amber-800">
+                      Standard User ({userProfile?.role || 'student'}) — No Admin Claim
+                    </span>
+                  </div>
+                </div>
+
+                <form onSubmit={handleBootstrapAdmin} className="space-y-3">
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-700 mb-1">
+                      Server Bootstrap Secret (Optional)
+                    </label>
+                    <input
+                      type="password"
+                      value={bootstrapSecret}
+                      onChange={(e) => setBootstrapSecret(e.target.value)}
+                      placeholder="Only needed if bootstrapping via server secret"
+                      className="w-full px-3 py-2 bg-[#F5F7F4] border border-black/10 rounded-xl text-slate-800 text-xs focus:outline-none focus:ring-2 focus:ring-[#176B45]"
+                    />
+                  </div>
+
+                  <button
+                    type="submit"
+                    disabled={isLoggingIn}
+                    className="w-full py-2.5 rounded-xl bg-[#176B45] text-white hover:bg-[#125537] font-semibold text-xs transition-colors shadow-sm flex items-center justify-center gap-2 disabled:opacity-50"
+                  >
+                    {isLoggingIn ? (
+                      <>
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                        <span>Verifying Administrator Claim...</span>
+                      </>
+                    ) : (
+                      <span>Verify & Bootstrap Administrator Rights</span>
+                    )}
+                  </button>
+                </form>
+
+                <div className="pt-2 text-center">
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      await logout();
+                      setAuthError('');
+                    }}
+                    className="text-xs text-slate-500 hover:text-red-600 underline"
+                  >
+                    Switch to a different Google Account
+                  </button>
+                </div>
               </div>
-
-              <div className="pt-2">
+            ) : (
+              <div className="space-y-4">
                 <button
-                  type="submit"
+                  type="button"
+                  onClick={handleGoogleAdminSignIn}
                   disabled={isLoggingIn}
-                  className="w-full py-2.5 rounded-xl bg-[#176B45] text-white hover:bg-[#125537] font-semibold text-xs transition-colors shadow-sm flex items-center justify-center gap-2 disabled:opacity-50"
+                  className="w-full py-3 px-4 rounded-xl border border-slate-300 bg-white hover:bg-slate-50 text-slate-800 font-semibold text-xs transition-all shadow-sm flex items-center justify-center gap-2.5 disabled:opacity-50"
                 >
                   {isLoggingIn ? (
                     <>
-                      <Loader2 className="w-4 h-4 animate-spin" />
-                      <span>Verifying with Server...</span>
+                      <Loader2 className="w-4 h-4 text-[#176B45] animate-spin" />
+                      <span>Authenticating with Google...</span>
                     </>
                   ) : (
-                    <span>Sign In to Admin Console</span>
+                    <>
+                      <svg className="w-4 h-4 shrink-0" viewBox="0 0 24 24">
+                        <path
+                          fill="#4285F4"
+                          d="M23.745 12.27c0-.7-.06-1.4-.19-2.07H12v4.51h6.6c-.29 1.52-1.14 2.82-2.4 3.68v3.05h3.88c2.27-2.09 3.665-5.17 3.665-9.17z"
+                        />
+                        <path
+                          fill="#34A853"
+                          d="M12 24c3.24 0 5.95-1.08 7.93-2.91l-3.88-3.05c-1.08.72-2.45 1.16-4.05 1.16-3.12 0-5.77-2.1-6.72-4.93H1.25v3.15C3.26 21.36 7.33 24 12 24z"
+                        />
+                        <path
+                          fill="#FBBC05"
+                          d="M5.28 14.27c-.25-.72-.38-1.49-.38-2.27s.13-1.55.38-2.27V6.58H1.25C.45 8.18 0 9.99 0 12s.45 3.82 1.25 5.42l4.03-3.15z"
+                        />
+                        <path
+                          fill="#EA4335"
+                          d="M12 4.75c1.77 0 3.35.61 4.6 1.8l3.42-3.42C17.95 1.19 15.24 0 12 0 7.33 0 3.26 2.64 1.25 6.58l4.03 3.15c.95-2.83 3.6-4.98 6.72-4.98z"
+                        />
+                      </svg>
+                      <span>Continue with Google as Administrator</span>
+                    </>
                   )}
                 </button>
-              </div>
 
-              <div className="p-2.5 rounded-xl bg-slate-100 text-[11px] text-slate-500 text-center">
-                Default configured credentials: <strong className="text-slate-700">admin@uenr.edu.gh</strong> (env: ADMIN_EMAIL)
+                <div className="p-3 rounded-xl bg-slate-50 border border-slate-100 text-[11px] text-slate-500 leading-relaxed text-center">
+                  Administrator access is restricted to verified campus admins. Standard accounts cannot perform admin actions.
+                </div>
               </div>
-            </form>
+            )}
           </div>
         ) : (
           /* Authenticated Workspace */
@@ -598,7 +832,7 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
                           required
                           value={formLat}
                           onChange={(e) => setFormLat(e.target.value)}
-                          placeholder="7.3495"
+                          placeholder="7.3502"
                           className="w-full px-3 py-2 bg-[#F5F7F4] border border-black/10 rounded-xl font-mono"
                         />
                       </div>
@@ -612,10 +846,44 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
                           required
                           value={formLng}
                           onChange={(e) => setFormLng(e.target.value)}
-                          placeholder="-2.3435"
+                          placeholder="-2.3425"
                           className="w-full px-3 py-2 bg-[#F5F7F4] border border-black/10 rounded-xl font-mono"
                         />
                       </div>
+
+                      {/* Live distance from campus center offset */}
+                      {(() => {
+                        const latNum = parseFloat(formLat);
+                        const lngNum = parseFloat(formLng);
+                        if (!isNaN(latNum) && !isNaN(lngNum)) {
+                          const dist = calculateDistanceMeters(latNum, lngNum, 7.3502, -2.3425);
+                          const isWarning = dist > 900;
+                          return (
+                            <div
+                              className={`col-span-full p-2.5 rounded-xl text-xs flex items-center justify-between border ${
+                                isWarning
+                                  ? 'bg-amber-50 text-amber-900 border-amber-200'
+                                  : 'bg-emerald-50 text-emerald-900 border-emerald-200'
+                              }`}
+                            >
+                              <span className="font-medium">
+                                Distance from Campus Core:{' '}
+                                <strong className="font-mono">{dist} meters</strong>
+                              </span>
+                              {isWarning ? (
+                                <span className="text-[11px] font-bold text-amber-700">
+                                  Warning: Outside typical academic core
+                                </span>
+                              ) : (
+                                <span className="text-[11px] font-semibold text-emerald-700">
+                                  Within Central UENR Perimeter
+                                </span>
+                              )}
+                            </div>
+                          );
+                        }
+                        return null;
+                      })()}
                     </div>
 
                     <div>
@@ -659,17 +927,35 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
                       </div>
                     </div>
 
-                    <div className="flex items-center gap-2 p-3 rounded-xl bg-slate-50 border border-black/5">
-                      <input
-                        type="checkbox"
-                        id="verifyCheckbox"
-                        checked={formVerified}
-                        onChange={(e) => setFormVerified(e.target.checked)}
-                        className="w-4 h-4 rounded text-[#176B45] focus:ring-[#176B45]"
-                      />
-                      <label htmlFor="verifyCheckbox" className="text-xs font-medium text-slate-700 cursor-pointer">
-                        Mark location coordinates as field-verified by UENR GIS team
-                      </label>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+                      <div>
+                        <label className="block font-semibold text-slate-700 mb-1">
+                          Geospatial Verification Status *
+                        </label>
+                        <select
+                          value={formVerificationStatus}
+                          onChange={(e) => setFormVerificationStatus(e.target.value as any)}
+                          className="w-full px-3 py-2 bg-[#F5F7F4] border border-black/10 rounded-xl font-medium"
+                        >
+                          <option value="verified">Verified (OSM Ground Truth / Survey)</option>
+                          <option value="needs_review">Needs Review (Unconfirmed Position)</option>
+                          <option value="unverified">Unverified (Pending Inspection)</option>
+                        </select>
+                      </div>
+
+                      <div>
+                        <label className="block font-semibold text-slate-700 mb-1">
+                          Data Source / Reference *
+                        </label>
+                        <input
+                          type="text"
+                          required
+                          value={formSource}
+                          onChange={(e) => setFormSource(e.target.value)}
+                          placeholder="e.g. OpenStreetMap Way 1251966523 or GPS Survey"
+                          className="w-full px-3 py-2 bg-[#F5F7F4] border border-black/10 rounded-xl"
+                        />
+                      </div>
                     </div>
 
                     <div className="pt-2 flex items-center justify-end gap-2">
@@ -694,71 +980,179 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
                     </div>
                   </form>
                 ) : (
-                  <div className="space-y-2">
+                  <div className="space-y-3">
+                    {/* Search & Filter Toolbar */}
+                    <div className="flex flex-col sm:flex-row gap-2">
+                      <div className="relative flex-1">
+                        <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                        <input
+                          type="text"
+                          value={searchFilter}
+                          onChange={(e) => setSearchFilter(e.target.value)}
+                          placeholder="Search campus facilities by name, code, or alias..."
+                          className="w-full pl-9 pr-3 py-2 bg-slate-50 border border-black/10 rounded-xl text-xs focus:outline-none focus:ring-2 focus:ring-[#176B45]"
+                        />
+                      </div>
+
+                      {/* Status Filter Tabs */}
+                      <div className="flex items-center gap-1 bg-slate-100 p-1 rounded-xl text-xs">
+                        {[
+                          { id: 'all', label: `All (${locations.length})` },
+                          {
+                            id: 'verified',
+                            label: `Verified (${locations.filter((l) => l.verificationStatus === 'verified').length})`,
+                          },
+                          {
+                            id: 'needs_review',
+                            label: `Review (${
+                              locations.filter(
+                                (l) =>
+                                  l.verificationStatus === 'needs_review' ||
+                                  l.verificationStatus === 'pending_verification'
+                              ).length
+                            })`,
+                          },
+                          {
+                            id: 'unverified',
+                            label: `Unverified (${
+                              locations.filter((l) => l.verificationStatus === 'unverified').length
+                            })`,
+                          },
+                        ].map((btn) => (
+                          <button
+                            key={btn.id}
+                            type="button"
+                            onClick={() => setStatusFilter(btn.id as any)}
+                            className={`px-2.5 py-1 rounded-lg font-medium transition-colors ${
+                              statusFilter === btn.id
+                                ? 'bg-white text-slate-900 shadow-xs'
+                                : 'text-slate-600 hover:text-slate-900'
+                            }`}
+                          >
+                            {btn.label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
                     <div className="text-xs text-slate-500 flex items-center justify-between">
-                      <span>Total {locations.length} campus facilities configured</span>
+                      <span>
+                        Showing {
+                          locations.filter((loc) => {
+                            const matchText =
+                              !searchFilter ||
+                              loc.name.toLowerCase().includes(searchFilter.toLowerCase()) ||
+                              loc.shortCode.toLowerCase().includes(searchFilter.toLowerCase()) ||
+                              loc.aliases.some((a) => a.toLowerCase().includes(searchFilter.toLowerCase()));
+                            const matchStat =
+                              statusFilter === 'all' ||
+                              (statusFilter === 'verified' && loc.verificationStatus === 'verified') ||
+                              (statusFilter === 'needs_review' &&
+                                (loc.verificationStatus === 'needs_review' ||
+                                  loc.verificationStatus === 'pending_verification')) ||
+                              (statusFilter === 'unverified' && loc.verificationStatus === 'unverified');
+                            return matchText && matchStat;
+                          }).length
+                        } of {locations.length} campus facilities
+                      </span>
                       <button
                         onClick={handleResetDefaults}
                         className="text-[11px] text-red-600 hover:underline flex items-center gap-1"
                       >
-                        <RotateCcw className="w-3 h-3" /> Reset to UENR Defaults
+                        <RotateCcw className="w-3 h-3" /> Reset to Verified Defaults
                       </button>
                     </div>
 
                     <div className="divide-y divide-black/5 border border-black/10 rounded-2xl overflow-hidden bg-white">
-                      {locations.map((loc) => {
-                        const meta = CATEGORY_METAS[loc.category];
-                        return (
-                          <div
-                            key={loc.id}
-                            className="p-3 sm:p-3.5 flex items-center justify-between gap-3 hover:bg-slate-50 transition-colors"
-                          >
-                            <div className="min-w-0 flex-1">
-                              <div className="flex items-center gap-2">
-                                <span className="font-semibold text-xs sm:text-sm text-slate-900 truncate">
-                                  {loc.name}
-                                </span>
-                                <span className="text-[10px] font-bold text-slate-500 bg-slate-100 px-1.5 py-0.5 rounded">
-                                  {loc.shortCode}
-                                </span>
-                                {loc.verificationStatus === 'verified' ? (
-                                  <span className="text-[10px] text-emerald-700 bg-emerald-50 px-1.5 py-0.5 rounded font-medium flex items-center gap-0.5">
-                                    <CheckCircle2 className="w-3 h-3" /> Verified
+                      {locations
+                        .filter((loc) => {
+                          const matchText =
+                            !searchFilter ||
+                            loc.name.toLowerCase().includes(searchFilter.toLowerCase()) ||
+                            loc.shortCode.toLowerCase().includes(searchFilter.toLowerCase()) ||
+                            loc.aliases.some((a) => a.toLowerCase().includes(searchFilter.toLowerCase()));
+                          const matchStat =
+                            statusFilter === 'all' ||
+                            (statusFilter === 'verified' && loc.verificationStatus === 'verified') ||
+                            (statusFilter === 'needs_review' &&
+                              (loc.verificationStatus === 'needs_review' ||
+                                loc.verificationStatus === 'pending_verification')) ||
+                            (statusFilter === 'unverified' && loc.verificationStatus === 'unverified');
+                          return matchText && matchStat;
+                        })
+                        .map((loc) => {
+                          const meta = CATEGORY_METAS[loc.category];
+                          return (
+                            <div
+                              key={loc.id}
+                              className="p-3 sm:p-3.5 flex items-center justify-between gap-3 hover:bg-slate-50 transition-colors"
+                            >
+                              <div className="min-w-0 flex-1">
+                                <div className="flex items-center gap-2 flex-wrap">
+                                  <span className="font-semibold text-xs sm:text-sm text-slate-900 truncate">
+                                    {loc.name}
                                   </span>
-                                ) : (
-                                  <span className="text-[10px] text-amber-700 bg-amber-50 px-1.5 py-0.5 rounded font-medium flex items-center gap-0.5">
-                                    <AlertCircle className="w-3 h-3" /> Pending Calibration
+                                  <span className="text-[10px] font-bold text-slate-500 bg-slate-100 px-1.5 py-0.5 rounded">
+                                    {loc.shortCode}
                                   </span>
-                                )}
+                                  {loc.verificationStatus === 'verified' ? (
+                                    <span className="text-[10px] text-emerald-700 bg-emerald-50 px-1.5 py-0.5 rounded font-medium flex items-center gap-0.5">
+                                      <CheckCircle2 className="w-3 h-3" /> Verified
+                                    </span>
+                                  ) : loc.verificationStatus === 'needs_review' ||
+                                    loc.verificationStatus === 'pending_verification' ? (
+                                    <span className="text-[10px] text-amber-700 bg-amber-50 px-1.5 py-0.5 rounded font-medium flex items-center gap-0.5">
+                                      <AlertCircle className="w-3 h-3" /> Needs Review
+                                    </span>
+                                  ) : (
+                                    <span className="text-[10px] text-slate-500 bg-slate-100 px-1.5 py-0.5 rounded font-medium flex items-center gap-0.5">
+                                      <AlertCircle className="w-3 h-3" /> Unverified
+                                    </span>
+                                  )}
+                                </div>
+                                <div className="text-[11px] text-slate-500 mt-1 flex items-center gap-2 flex-wrap">
+                                  <span>{meta?.label || loc.category}</span>
+                                  <span>·</span>
+                                  <span className="font-mono text-slate-700 font-medium">
+                                    {loc.lat.toFixed(5)}° N, {Math.abs(loc.lng).toFixed(5)}° W
+                                  </span>
+                                  {loc.source && (
+                                    <>
+                                      <span>·</span>
+                                      <span className="text-slate-500 truncate max-w-[260px]">
+                                        Src: {loc.source}
+                                      </span>
+                                    </>
+                                  )}
+                                </div>
                               </div>
-                              <div className="text-[11px] text-slate-500 mt-0.5 flex items-center gap-2">
-                                <span>{meta?.label || loc.category}</span>
-                                <span>·</span>
-                                <span className="font-mono">
-                                  {loc.lat.toFixed(4)}, {loc.lng.toFixed(4)}
-                                </span>
-                              </div>
-                            </div>
 
-                            <div className="flex items-center gap-1 shrink-0">
-                              <button
-                                onClick={() => handleEditClick(loc)}
-                                className="p-1.5 rounded-lg text-slate-600 hover:bg-slate-200 transition-colors"
-                                title="Edit building"
-                              >
-                                <Edit2 className="w-3.5 h-3.5" />
-                              </button>
-                              <button
-                                onClick={() => handleDeleteLocation(loc.id)}
-                                className="p-1.5 rounded-lg text-red-500 hover:bg-red-50 transition-colors"
-                                title="Delete location"
-                              >
-                                <Trash2 className="w-3.5 h-3.5" />
-                              </button>
+                              <div className="flex items-center gap-1 shrink-0">
+                                <button
+                                  onClick={() => onFocusLocation(loc)}
+                                  className="p-1.5 rounded-lg text-emerald-700 hover:bg-emerald-50 transition-colors"
+                                  title="View pin on map"
+                                >
+                                  <MapPin className="w-3.5 h-3.5" />
+                                </button>
+                                <button
+                                  onClick={() => handleEditClick(loc)}
+                                  className="p-1.5 rounded-lg text-slate-600 hover:bg-slate-200 transition-colors"
+                                  title="Edit coordinates & details"
+                                >
+                                  <Edit2 className="w-3.5 h-3.5" />
+                                </button>
+                                <button
+                                  onClick={() => handleDeleteLocation(loc.id)}
+                                  className="p-1.5 rounded-lg text-red-500 hover:bg-red-50 transition-colors"
+                                  title="Delete location"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                </button>
+                              </div>
                             </div>
-                          </div>
-                        );
-                      })}
+                          );
+                        })}
                     </div>
                   </div>
                 )}
@@ -824,94 +1218,359 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
               </div>
             )}
 
-            {/* Notices Tab */}
+            {/* Campus Announcements & Notices Suite */}
             {activeTab === 'notices' && (
-              <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-4">
-                <form onSubmit={handlePostNotice} className="p-4 rounded-2xl bg-[#F5F7F4] border border-black/5 space-y-3 text-xs">
-                  <div className="font-bold text-slate-800 text-sm">Broadcast Campus Notice</div>
-                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+              <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-5">
+                {/* Announcement Creation / Editing Form */}
+                <div className="p-4 sm:p-5 rounded-2xl bg-[#F5F7F4] border border-black/10 space-y-4 text-xs">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <div className="w-7 h-7 rounded-lg bg-[#176B45] text-white flex items-center justify-center font-bold">
+                        <Bell className="w-4 h-4" />
+                      </div>
+                      <div>
+                        <h3 className="font-bold text-slate-800 text-sm">
+                          {editingNotice ? `Edit Announcement: "${editingNotice.title}"` : 'Compose Campus Announcement'}
+                        </h3>
+                        <p className="text-[11px] text-slate-500">
+                          Broadcast official university announcements, schedule advisories, or save drafts
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setIsPreviewingNotice(!isPreviewingNotice)}
+                        className={`px-3 py-1.5 rounded-xl font-semibold flex items-center gap-1.5 transition-colors ${
+                          isPreviewingNotice
+                            ? 'bg-[#176B45] text-white'
+                            : 'bg-white text-slate-700 border border-black/10 hover:bg-slate-50'
+                        }`}
+                      >
+                        {isPreviewingNotice ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                        <span>{isPreviewingNotice ? 'Hide Preview' : 'Live Preview'}</span>
+                      </button>
+
+                      {editingNotice && (
+                        <button
+                          type="button"
+                          onClick={handleCancelNoticeEdit}
+                          className="px-3 py-1.5 rounded-xl bg-slate-200 text-slate-700 hover:bg-slate-300 font-semibold"
+                        >
+                          Cancel Edit
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Live Student Preview Box */}
+                  {isPreviewingNotice && (
+                    <div className="p-4 rounded-2xl bg-white border-2 border-emerald-500/40 shadow-sm space-y-2">
+                      <div className="text-[10px] font-bold uppercase tracking-wider text-emerald-800 flex items-center gap-1">
+                        <Eye className="w-3.5 h-3.5" />
+                        <span>Student View Preview</span>
+                      </div>
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="text-[10px] font-bold uppercase px-2 py-0.5 rounded-md bg-emerald-100 text-emerald-800">
+                          {noticeCategory}
+                        </span>
+                        {noticePriority === 'Urgent' && (
+                          <span className="text-[10px] font-bold uppercase px-2 py-0.5 rounded-md bg-red-100 text-red-700">
+                            Urgent
+                          </span>
+                        )}
+                        {noticePriority === 'Important' && (
+                          <span className="text-[10px] font-bold uppercase px-2 py-0.5 rounded-md bg-amber-100 text-amber-800">
+                            Important
+                          </span>
+                        )}
+                        <span className="text-[10px] text-slate-400">Scheduled: {noticeScheduledAt || 'Immediately'}</span>
+                      </div>
+                      <h4 className="font-bold text-slate-900 text-sm">
+                        {noticeTitle || 'Untitled Announcement'}
+                      </h4>
+                      <p className="text-slate-600 leading-relaxed text-xs">
+                        {noticeMessage || 'Announcement message preview will appear here.'}
+                      </p>
+                      {noticeLocationId && (
+                        <div className="text-[11px] font-semibold text-[#176B45] flex items-center gap-1 pt-1">
+                          <MapPin className="w-3 h-3" />
+                          <span>Linked venue: {locations.find((l) => l.id === noticeLocationId)?.name}</span>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Form Input Grid */}
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                     <div className="sm:col-span-2">
-                      <label className="block font-semibold text-slate-700 mb-1">Headline</label>
+                      <label className="block font-semibold text-slate-700 mb-1">Headline / Title *</label>
                       <input
                         type="text"
                         required
                         value={noticeTitle}
                         onChange={(e) => setNoticeTitle(e.target.value)}
-                        placeholder="e.g. Pathway Paving Near Odum Block"
-                        className="w-full px-3 py-1.5 bg-white border border-black/10 rounded-xl"
+                        placeholder="e.g. Matriculation Ceremony at Bank of Ghana Auditorium"
+                        className="w-full px-3 py-2 bg-white border border-black/10 rounded-xl text-slate-800 focus:outline-none focus:ring-2 focus:ring-[#176B45]"
                       />
                     </div>
+
                     <div>
-                      <label className="block font-semibold text-slate-700 mb-1">Notice Type</label>
+                      <label className="block font-semibold text-slate-700 mb-1">Category *</label>
                       <select
-                        value={noticeType}
-                        onChange={(e) => setNoticeType(e.target.value as any)}
-                        className="w-full px-3 py-1.5 bg-white border border-black/10 rounded-xl"
+                        value={noticeCategory}
+                        onChange={(e) => setNoticeCategory(e.target.value as any)}
+                        className="w-full px-3 py-2 bg-white border border-black/10 rounded-xl text-slate-800 focus:outline-none focus:ring-2 focus:ring-[#176B45]"
                       >
-                        <option value="warning">Warning / Detour</option>
-                        <option value="event">Campus Event</option>
-                        <option value="info">General Info</option>
-                        <option value="critical">Critical Alert</option>
+                        <option value="General">General Notice</option>
+                        <option value="Academic">Academic Notice</option>
+                        <option value="Events">Campus Event</option>
+                        <option value="Maintenance">Maintenance & Detours</option>
+                        <option value="Safety">Campus Safety</option>
+                        <option value="Emergency">Emergency Alert</option>
                       </select>
                     </div>
+
+                    <div>
+                      <label className="block font-semibold text-slate-700 mb-1">Priority Level *</label>
+                      <select
+                        value={noticePriority}
+                        onChange={(e) => setNoticePriority(e.target.value as any)}
+                        className="w-full px-3 py-2 bg-white border border-black/10 rounded-xl text-slate-800 focus:outline-none focus:ring-2 focus:ring-[#176B45]"
+                      >
+                        <option value="Normal">Normal Priority</option>
+                        <option value="Important">Important (Amber Badge)</option>
+                        <option value="Urgent">Urgent (Red Alert Badge)</option>
+                      </select>
+                    </div>
+
+                    <div>
+                      <label className="block font-semibold text-slate-700 mb-1">Linked Campus Location</label>
+                      <select
+                        value={noticeLocationId}
+                        onChange={(e) => setNoticeLocationId(e.target.value)}
+                        className="w-full px-3 py-2 bg-white border border-black/10 rounded-xl text-slate-800 focus:outline-none focus:ring-2 focus:ring-[#176B45]"
+                      >
+                        <option value="">None (Campus-wide notice)</option>
+                        {locations.map((loc) => (
+                          <option key={loc.id} value={loc.id}>
+                            {loc.name} ({loc.shortCode})
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    <div>
+                      <label className="block font-semibold text-slate-700 mb-1">Publication Mode</label>
+                      <select
+                        value={noticeStatus}
+                        onChange={(e) => setNoticeStatus(e.target.value as any)}
+                        className="w-full px-3 py-2 bg-white border border-black/10 rounded-xl text-slate-800 focus:outline-none focus:ring-2 focus:ring-[#176B45]"
+                      >
+                        <option value="published">Publish Immediately</option>
+                        <option value="scheduled">Schedule for Future Date/Time</option>
+                        <option value="draft">Save as Internal Draft</option>
+                      </select>
+                    </div>
+
+                    {/* Schedule Date-Time (if scheduled) */}
+                    {noticeStatus === 'scheduled' && (
+                      <div className="sm:col-span-2">
+                        <label className="block font-semibold text-slate-700 mb-1">
+                          Scheduled Release Date & Time *
+                        </label>
+                        <input
+                          type="datetime-local"
+                          value={noticeScheduledAt}
+                          onChange={(e) => setNoticeScheduledAt(e.target.value)}
+                          className="w-full px-3 py-2 bg-white border border-black/10 rounded-xl text-slate-800"
+                        />
+                      </div>
+                    )}
+
+                    {/* Optional Expiry Date-Time */}
+                    <div>
+                      <label className="block font-semibold text-slate-700 mb-1">Expiration Date (Optional)</label>
+                      <input
+                        type="date"
+                        value={noticeExpiresAt ? noticeExpiresAt.split('T')[0] : ''}
+                        onChange={(e) => setNoticeExpiresAt(e.target.value ? `${e.target.value}T23:59:59Z` : '')}
+                        className="w-full px-3 py-2 bg-white border border-black/10 rounded-xl text-slate-800"
+                      />
+                    </div>
                   </div>
+
                   <div>
-                    <label className="block font-semibold text-slate-700 mb-1">Detailed Message</label>
+                    <label className="block font-semibold text-slate-700 mb-1">Full Announcement Message *</label>
                     <textarea
-                      rows={2}
+                      rows={3}
                       required
                       value={noticeMessage}
                       onChange={(e) => setNoticeMessage(e.target.value)}
-                      placeholder="Instructions for students and visitors..."
-                      className="w-full px-3 py-1.5 bg-white border border-black/10 rounded-xl text-xs resize-none"
+                      placeholder="Detailed instructions, detour advisories, event timing, or safety steps for students and staff..."
+                      className="w-full px-3 py-2 bg-white border border-black/10 rounded-xl text-slate-800 resize-none focus:outline-none focus:ring-2 focus:ring-[#176B45]"
                     />
                   </div>
-                  <div className="flex justify-end">
-                    <button
-                      type="submit"
-                      disabled={actionLoading}
-                      className="px-4 py-1.5 rounded-xl bg-[#176B45] text-white hover:bg-[#125537] text-xs font-semibold shadow-xs disabled:opacity-50"
-                    >
-                      Publish Notice
-                    </button>
+
+                  {/* Submission Buttons */}
+                  <div className="flex items-center justify-between pt-1 border-t border-black/5 flex-wrap gap-2">
+                    <span className="text-[11px] text-slate-400">
+                      Author UID audit stamp: <span className="font-mono text-slate-600">{currentUser?.uid || 'admin'}</span>
+                    </span>
+
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => handleSaveNotice('draft')}
+                        disabled={actionLoading}
+                        className="px-3.5 py-2 rounded-xl bg-slate-200 hover:bg-slate-300 text-slate-700 font-semibold transition-colors disabled:opacity-50"
+                      >
+                        Save Draft
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => handleSaveNotice(noticeStatus === 'scheduled' ? 'scheduled' : 'published')}
+                        disabled={actionLoading}
+                        className="px-5 py-2 rounded-xl bg-[#176B45] text-white hover:bg-[#125537] font-semibold transition-all shadow-sm flex items-center gap-1.5 disabled:opacity-50"
+                      >
+                        {actionLoading ? (
+                          <Loader2 className="w-4 h-4 animate-spin" />
+                        ) : (
+                          <Save className="w-4 h-4 text-[#D7F36A]" />
+                        )}
+                        <span>
+                          {editingNotice
+                            ? 'Update Announcement'
+                            : noticeStatus === 'scheduled'
+                            ? 'Schedule Announcement'
+                            : 'Publish Immediately'}
+                        </span>
+                      </button>
+                    </div>
                   </div>
-                </form>
+                </div>
 
-                <div className="space-y-2">
-                  <div className="font-semibold text-xs text-slate-700">Active Notices:</div>
-                  {notices.map((n) => (
-                    <div
-                      key={n.id}
-                      className="p-3 rounded-xl bg-white border border-black/10 flex items-center justify-between gap-3 text-xs"
-                    >
-                      <div>
-                        <div className="flex items-center gap-2">
-                          <span className="font-bold text-slate-800">{n.title}</span>
-                          <span className="text-[10px] px-1.5 py-0.2 rounded bg-slate-100 text-slate-600 uppercase font-semibold">
-                            {n.type}
-                          </span>
-                        </div>
-                        <p className="text-slate-600 text-xs mt-0.5">{n.message}</p>
-                      </div>
+                {/* Notices Management List */}
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between flex-wrap gap-2">
+                    <div className="font-bold text-sm text-slate-800">
+                      Campus Announcements Archive ({notices.length})
+                    </div>
 
-                      <div className="flex items-center gap-1.5 shrink-0">
+                    {/* Filter Pills */}
+                    <div className="flex items-center gap-1 bg-slate-100 p-1 rounded-xl text-xs font-medium">
+                      {(['all', 'published', 'scheduled', 'draft', 'archived'] as const).map((st) => (
                         <button
-                          onClick={() => handleToggleNotice(n)}
-                          className={`px-2 py-1 rounded text-[11px] font-semibold ${
-                            n.active ? 'bg-emerald-100 text-emerald-800' : 'bg-slate-200 text-slate-600'
+                          key={st}
+                          onClick={() => setNoticeFilterStatus(st)}
+                          className={`px-2.5 py-1 rounded-lg capitalize transition-all ${
+                            noticeFilterStatus === st
+                              ? 'bg-white text-[#176B45] font-bold shadow-xs'
+                              : 'text-slate-600 hover:text-slate-900'
                           }`}
                         >
-                          {n.active ? 'Active' : 'Archived'}
+                          {st}
                         </button>
-                        <button
-                          onClick={() => handleDeleteNotice(n.id)}
-                          className="p-1 text-red-500 hover:bg-red-50 rounded"
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                        </button>
-                      </div>
+                      ))}
                     </div>
-                  ))}
+                  </div>
+
+                  {notices
+                    .filter((n) => {
+                      if (noticeFilterStatus === 'all') return true;
+                      if (noticeFilterStatus === 'archived') return !n.active || n.status === 'archived';
+                      return n.status === noticeFilterStatus;
+                    })
+                    .map((n) => (
+                      <div
+                        key={n.id}
+                        className={`p-3.5 rounded-2xl border transition-all flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs ${
+                          editingNotice?.id === n.id
+                            ? 'bg-emerald-50 border-emerald-400'
+                            : !n.active || n.status === 'archived'
+                            ? 'bg-slate-50 border-slate-200 opacity-75'
+                            : 'bg-white border-black/10 hover:border-black/20'
+                        }`}
+                      >
+                        <div className="space-y-1 min-w-0 flex-1">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="font-bold text-slate-900 text-sm">{n.title}</span>
+                            <span className="text-[10px] px-1.5 py-0.5 rounded font-semibold uppercase bg-slate-100 text-slate-700">
+                              {n.category || 'General'}
+                            </span>
+                            <span
+                              className={`text-[10px] px-1.5 py-0.5 rounded font-semibold uppercase ${
+                                n.priority === 'Urgent'
+                                  ? 'bg-red-100 text-red-700'
+                                  : n.priority === 'Important'
+                                  ? 'bg-amber-100 text-amber-800'
+                                  : 'bg-slate-100 text-slate-600'
+                              }`}
+                            >
+                              {n.priority || 'Normal'}
+                            </span>
+                            <span
+                              className={`text-[10px] px-1.5 py-0.5 rounded font-bold uppercase ${
+                                n.status === 'published'
+                                  ? 'bg-emerald-100 text-emerald-800'
+                                  : n.status === 'scheduled'
+                                  ? 'bg-blue-100 text-blue-800'
+                                  : n.status === 'draft'
+                                  ? 'bg-amber-100 text-amber-800'
+                                  : 'bg-slate-200 text-slate-600'
+                              }`}
+                            >
+                              {n.status || 'published'}
+                            </span>
+                          </div>
+
+                          <p className="text-slate-600 line-clamp-2 leading-relaxed">{n.message}</p>
+
+                          <div className="flex items-center gap-3 text-[10px] text-slate-400 flex-wrap pt-0.5">
+                            {n.locationName && (
+                              <span className="text-[#176B45] font-semibold flex items-center gap-1">
+                                <MapPin className="w-3 h-3" /> {n.locationName}
+                              </span>
+                            )}
+                            {n.scheduledAt && <span>Scheduled: {new Date(n.scheduledAt).toLocaleString()}</span>}
+                            {n.expiresAt && <span>Expires: {new Date(n.expiresAt).toLocaleDateString()}</span>}
+                            <span>Audited: {n.authorUid || 'admin'}</span>
+                          </div>
+                        </div>
+
+                        {/* Actions */}
+                        <div className="flex items-center gap-2 shrink-0 pt-2 sm:pt-0 border-t sm:border-t-0 border-black/5">
+                          <button
+                            onClick={() => handleEditNotice(n)}
+                            className="px-2.5 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold text-[11px] flex items-center gap-1"
+                            title="Edit announcement"
+                          >
+                            <Edit2 className="w-3 h-3 text-[#176B45]" />
+                            <span>Edit</span>
+                          </button>
+
+                          <button
+                            onClick={() => handleToggleNotice(n)}
+                            className={`px-2.5 py-1.5 rounded-lg text-[11px] font-semibold transition-colors ${
+                              n.active ? 'bg-emerald-100 text-emerald-800 hover:bg-emerald-200' : 'bg-slate-200 text-slate-600'
+                            }`}
+                            title="Toggle active status"
+                          >
+                            {n.active ? 'Published' : 'Archived'}
+                          </button>
+
+                          <button
+                            onClick={() => handleDeleteNotice(n.id)}
+                            className="p-1.5 text-red-500 hover:bg-red-50 rounded-lg transition-colors"
+                            title="Delete announcement"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      </div>
+                    ))}
                 </div>
               </div>
             )}
@@ -987,7 +1646,12 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
                                       lng,
                                       description: String(f.properties?.description || '').replace(/[<>]/g, ''),
                                       accessibility: String(f.properties?.accessibility || 'Standard access'),
-                                      verificationStatus: 'verified',
+                                      verificationStatus:
+                                        f.properties?.verificationStatus === 'needs_review' ||
+                                        f.properties?.verificationStatus === 'unverified'
+                                          ? f.properties.verificationStatus
+                                          : 'verified',
+                                      source: String(f.properties?.source || 'Imported GeoJSON Dataset'),
                                       lastVerified: new Date().toISOString().split('T')[0],
                                       facilities: ['Standard Facilities'],
                                     });
@@ -1013,6 +1677,103 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
                               }
                             } catch {
                               alert('Failed to parse GeoJSON file.');
+                            }
+                          };
+                          reader.readAsText(file);
+                        }
+                      }}
+                    />
+                  </label>
+                </div>
+
+                {/* CSV Import */}
+                <div className="pt-4 border-t border-black/10 space-y-2">
+                  <h3 className="font-bold text-sm text-slate-800">Import CSV Spreadsheet</h3>
+                  <p className="text-xs text-slate-600">
+                    Upload a CSV spreadsheet with headers (name, latitude, longitude, category, source):
+                  </p>
+                  <label className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl border border-dashed border-slate-400 bg-slate-50 hover:bg-slate-100 cursor-pointer text-xs font-semibold text-slate-700 transition-colors">
+                    <FileUp className="w-4 h-4 text-emerald-700" />
+                    <span>Choose CSV File</span>
+                    <input
+                      type="file"
+                      accept=".csv,text/csv"
+                      className="hidden"
+                      onChange={(e) => {
+                        const file = e.target.files?.[0];
+                        if (file) {
+                          const reader = new FileReader();
+                          reader.onload = async (event) => {
+                            try {
+                              const text = event.target?.result as string;
+                              const lines = text.split('\n').map((l) => l.trim()).filter(Boolean);
+                              if (lines.length < 2) {
+                                alert('CSV file is empty or missing data rows.');
+                                return;
+                              }
+
+                              const headerCols = lines[0].split(',').map((h) => h.replace(/["\r]/g, '').trim().toLowerCase());
+                              const latIdx = headerCols.findIndex((c) => c === 'latitude' || c === 'lat');
+                              const lngIdx = headerCols.findIndex((c) => c === 'longitude' || c === 'lng' || c === 'lon');
+                              const nameIdx = headerCols.findIndex((c) => c === 'name');
+                              const catIdx = headerCols.findIndex((c) => c === 'category');
+                              const srcIdx = headerCols.findIndex((c) => c === 'source');
+                              const statIdx = headerCols.findIndex((c) => c === 'verificationstatus' || c === 'status');
+
+                              if (latIdx === -1 || lngIdx === -1 || nameIdx === -1) {
+                                alert('CSV must include "name", "latitude", and "longitude" columns.');
+                                return;
+                              }
+
+                              const imported: CampusLocation[] = [];
+                              let rejected = 0;
+
+                              for (let i = 1; i < lines.length; i++) {
+                                const row = lines[i].split(',').map((val) => val.replace(/^["']|["']$/g, '').trim());
+                                const lat = parseFloat(row[latIdx]);
+                                const lng = parseFloat(row[lngIdx]);
+                                const name = row[nameIdx];
+
+                                if (
+                                  name &&
+                                  !isNaN(lat) &&
+                                  !isNaN(lng) &&
+                                  lat >= 7.33 &&
+                                  lat <= 7.37 &&
+                                  lng >= -2.36 &&
+                                  lng <= -2.32
+                                ) {
+                                  imported.push({
+                                    id: `csv-${Date.now()}-${imported.length}`,
+                                    name,
+                                    shortCode: name.slice(0, 4).toUpperCase(),
+                                    aliases: [],
+                                    category: (catIdx !== -1 && row[catIdx] ? row[catIdx] : 'lecture_hall') as CampusCategory,
+                                    lat,
+                                    lng,
+                                    description: `Imported coordinate for ${name}`,
+                                    accessibility: 'Standard access',
+                                    verificationStatus:
+                                      statIdx !== -1 && row[statIdx] === 'needs_review'
+                                        ? 'needs_review'
+                                        : 'verified',
+                                    source: srcIdx !== -1 && row[srcIdx] ? row[srcIdx] : 'CSV Spreadsheet Import',
+                                    lastVerified: new Date().toISOString().split('T')[0],
+                                    facilities: ['Standard Facilities'],
+                                  });
+                                } else {
+                                  rejected++;
+                                }
+                              }
+
+                              if (imported.length > 0) {
+                                onUpdateLocations([...imported, ...locations]);
+                                alert(`Successfully imported ${imported.length} facilities from CSV! (${rejected} skipped)`);
+                              } else {
+                                alert('No valid UENR coordinates found in CSV.');
+                              }
+                            } catch {
+                              alert('Failed to parse CSV file.');
                             }
                           };
                           reader.readAsText(file);

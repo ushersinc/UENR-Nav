@@ -74,19 +74,49 @@ let campusNotices: CampusNotice[] = [
     id: 'notice-1',
     title: 'Matriculation Ceremony at BoG Auditorium',
     message:
-      'Bank of Ghana Auditorium is reserved today for the Matriculation Ceremony. Please use the West walkway.',
+      'Bank of Ghana Auditorium is reserved today for the 2026 Matriculation Ceremony. Please use the West walkway and follow security instructions.',
+    category: 'Events',
+    priority: 'Important',
+    status: 'published',
     type: 'event',
-    postedDate: 'Today',
+    postedDate: 'Today, 8:00 AM',
+    publishedAt: new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(),
+    affectedLocationId: 'bog-auditorium',
+    locationName: 'Bank of Ghana Auditorium',
     active: true,
+    authorUid: 'admin-uenr-sys',
   },
   {
     id: 'notice-2',
     title: 'Pedestrian Walkway Paving near Odum Block',
     message:
-      'Pathway renovation in progress between Odum Block and LT Block. Caution advised; detour available via School Field avenue.',
+      'Pathway renovation in progress between Odum Block and LT Block. Caution advised; detour available via School Field avenue. Step-free wheelchair access maintained along Administration West Avenue.',
+    category: 'Maintenance',
+    priority: 'Normal',
+    status: 'published',
     type: 'warning',
     postedDate: 'Yesterday',
+    publishedAt: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(),
+    affectedLocationId: 'odum-block',
+    locationName: 'Odum Block',
     active: true,
+    authorUid: 'admin-uenr-sys',
+  },
+  {
+    id: 'notice-3',
+    title: 'Free Health Screening at UENR Clinic',
+    message:
+      'Annual health and wellness checkups for all freshers and continuing students at the UENR Health Clinic. 24/7 outpatient services remain open.',
+    category: 'Safety',
+    priority: 'Normal',
+    status: 'published',
+    type: 'info',
+    postedDate: '2 days ago',
+    publishedAt: new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString(),
+    affectedLocationId: 'school-clinic',
+    locationName: 'School Clinic',
+    active: true,
+    authorUid: 'admin-uenr-sys',
   },
 ];
 
@@ -160,48 +190,33 @@ function verifyAdminToken(token: string | undefined): boolean {
   }
 }
 
-// Authentication Guard Middleware (Supports Firebase ID Tokens & Cryptographic HMAC)
+// Authentication Guard Middleware (Requires Server-Provisioned Admin Custom Claims)
 async function requireAdminAuth(req: Request, res: Response, next: NextFunction) {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    return res.status(401).json({ error: 'Unauthorized. Admin credentials or ID token required.' });
+    return res.status(401).json({ error: 'Unauthorized. Admin ID token required.' });
   }
 
   const token = authHeader.split(' ')[1];
 
-  // 1. Verify via Firebase Admin SDK
   try {
     const auth = getAuth();
     const decoded = await auth.verifyIdToken(token);
 
-    // Verify admin custom claim OR verified institutional/runtime admin email
-    const isEmailVerified = decoded.email_verified === true;
-    const isVerifiedAdminEmail =
-      isEmailVerified &&
-      (decoded.email?.toLowerCase() === ADMIN_EMAIL.toLowerCase() ||
-       decoded.email?.toLowerCase() === RUNTIME_ADMIN_EMAIL.toLowerCase());
+    // CRITICAL: Require explicit admin custom claim. Email alone never grants admin access.
+    const hasAdminCustomClaim = decoded.admin === true || decoded.role === 'admin';
 
-    const isFirebaseAdmin =
-      decoded.admin === true ||
-      decoded.role === 'admin' ||
-      isVerifiedAdminEmail;
-
-    if (isFirebaseAdmin) {
-      if (isVerifiedAdminEmail && decoded.admin !== true) {
-        auth.setCustomUserClaims(decoded.uid, { admin: true, role: 'admin' }).catch(() => {});
-      }
+    if (hasAdminCustomClaim) {
       (req as any).user = decoded;
       return next();
     }
+
+    return res.status(403).json({
+      error: 'Forbidden. Verified administrator custom claim required on your account.',
+    });
   } catch (err: any) {
-    // If not a valid Firebase ID Token, check cryptographic HMAC session token if enabled
-    if (ADMIN_PASSWORD_HASH && verifyAdminToken(token)) {
-      return next();
-    }
     return res.status(401).json({ error: 'Invalid, expired, or malformed authentication token.' });
   }
-
-  return res.status(403).json({ error: 'Forbidden. Verified administrator privileges required.' });
 }
 
 // Input Sanitization Helper
@@ -324,7 +339,14 @@ app.post('/api/locations', requireAdminAuth, (req, res) => {
     description: sanitizeString(description),
     openingHours: sanitizeString(openingHours),
     accessibility: sanitizeString(accessibility) || 'Standard campus access',
-    verificationStatus: verificationStatus === 'verified' ? 'verified' : 'pending_verification',
+    verificationStatus:
+      verificationStatus === 'needs_review' ||
+      verificationStatus === 'unverified' ||
+      verificationStatus === 'pending_verification'
+        ? verificationStatus
+        : 'verified',
+    source: sanitizeString(req.body.source) || 'Admin Entry',
+    osmId: sanitizeString(req.body.osmId) || undefined,
     lastVerified: new Date().toISOString().split('T')[0],
     facilities: Array.isArray(facilities) ? facilities.map(sanitizeString) : ['Standard Facilities'],
     isCustomAdded: true,
@@ -355,6 +377,8 @@ app.put('/api/locations/:id', requireAdminAuth, (req, res) => {
     accessibility,
     verificationStatus,
     facilities,
+    source,
+    osmId,
   } = req.body;
 
   if (lat !== undefined && lng !== undefined && !isValidCampusCoordinate(lat, lng)) {
@@ -375,11 +399,14 @@ app.put('/api/locations/:id', requireAdminAuth, (req, res) => {
     openingHours: openingHours !== undefined ? sanitizeString(openingHours) : existing.openingHours,
     accessibility: accessibility !== undefined ? sanitizeString(accessibility) : existing.accessibility,
     verificationStatus:
-      verificationStatus === 'verified'
-        ? 'verified'
-        : verificationStatus === 'pending_verification'
-        ? 'pending_verification'
+      verificationStatus === 'verified' ||
+      verificationStatus === 'needs_review' ||
+      verificationStatus === 'unverified' ||
+      verificationStatus === 'pending_verification'
+        ? verificationStatus
         : existing.verificationStatus,
+    source: source !== undefined ? sanitizeString(source) : existing.source,
+    osmId: osmId !== undefined ? sanitizeString(osmId) : existing.osmId,
     lastVerified: new Date().toISOString().split('T')[0],
     facilities: Array.isArray(facilities) ? facilities.map(sanitizeString) : existing.facilities,
   };
@@ -463,29 +490,160 @@ app.patch('/api/reports/:id', requireAdminAuth, (req, res) => {
   res.json(report);
 });
 
-// 6. Campus Notices Endpoints
-app.get('/api/notices', (_req, res) => {
-  res.json(campusNotices);
+// 6. Campus Announcements & Notices Endpoints
+app.get('/api/notices', async (req, res) => {
+  const authHeader = req.headers.authorization;
+  let isCallerAdmin = false;
+
+  if (authHeader && authHeader.startsWith('Bearer ')) {
+    const token = authHeader.split(' ')[1];
+    try {
+      const decoded = await getAuth().verifyIdToken(token);
+      if (decoded.admin === true || decoded.role === 'admin') {
+        isCallerAdmin = true;
+      }
+    } catch {
+      // Non-admin or unauthenticated visitor
+    }
+  }
+
+  if (isCallerAdmin) {
+    return res.json(campusNotices);
+  }
+
+  // Filter for students and public visitors:
+  // Must be active and published; hide future scheduled; hide past expired
+  const now = new Date();
+  const visibleNotices = campusNotices.filter((n) => {
+    if (!n.active) return false;
+    if (n.status && n.status !== 'published') return false;
+
+    if (n.scheduledAt) {
+      const sched = new Date(n.scheduledAt);
+      if (sched > now) return false;
+    }
+
+    if (n.expiresAt) {
+      const exp = new Date(n.expiresAt);
+      if (exp <= now) return false;
+    }
+
+    return true;
+  });
+
+  res.json(visibleNotices);
 });
 
 app.post('/api/notices', requireAdminAuth, (req, res) => {
-  const { title, message, type } = req.body;
+  const {
+    title,
+    message,
+    category,
+    priority,
+    status,
+    type,
+    affectedLocationId,
+    locationName,
+    scheduledAt,
+    expiresAt,
+    startTime,
+    endTime,
+  } = req.body;
 
   if (!title || !message) {
     return res.status(400).json({ error: 'Title and message are required.' });
   }
 
+  const cleanTitle = sanitizeString(title);
+  const cleanMessage = sanitizeString(message);
+  if (cleanTitle.length < 3 || cleanTitle.length > 200) {
+    return res.status(400).json({ error: 'Title must be between 3 and 200 characters.' });
+  }
+  if (cleanMessage.length < 5 || cleanMessage.length > 3000) {
+    return res.status(400).json({ error: 'Message must be between 5 and 3000 characters.' });
+  }
+
+  const validCategories = ['General', 'Academic', 'Events', 'Maintenance', 'Safety', 'Emergency'];
+  const validPriorities = ['Normal', 'Important', 'Urgent'];
+  const validStatuses = ['draft', 'scheduled', 'published', 'archived'];
+
+  const now = new Date().toISOString();
+  const adminUid = (req as any).user?.uid || 'admin';
+  const noticeStatus = validStatuses.includes(status) ? status : 'published';
+
   const newNotice: CampusNotice = {
     id: `notice-${Date.now()}`,
-    title: sanitizeString(title),
-    message: sanitizeString(message),
+    title: cleanTitle,
+    message: cleanMessage,
+    category: validCategories.includes(category) ? category : 'General',
+    priority: validPriorities.includes(priority) ? priority : 'Normal',
+    status: noticeStatus as any,
     type: ['warning', 'info', 'critical', 'event'].includes(type) ? type : 'info',
+    affectedLocationId: affectedLocationId ? sanitizeString(affectedLocationId) : undefined,
+    locationName: locationName ? sanitizeString(locationName) : undefined,
     postedDate: 'Just now',
+    publishedAt: noticeStatus === 'published' ? now : undefined,
+    scheduledAt: scheduledAt ? sanitizeString(scheduledAt) : undefined,
+    expiresAt: expiresAt ? sanitizeString(expiresAt) : undefined,
+    startTime: startTime ? sanitizeString(startTime) : undefined,
+    endTime: endTime ? sanitizeString(endTime) : undefined,
+    authorUid: adminUid,
     active: true,
+    createdAt: now,
+    updatedAt: now,
   };
 
   campusNotices.unshift(newNotice);
   res.status(201).json(newNotice);
+});
+
+app.put('/api/notices/:id', requireAdminAuth, (req, res) => {
+  const { id } = req.params;
+  const notice = campusNotices.find((n) => n.id === id);
+
+  if (!notice) {
+    return res.status(404).json({ error: 'Notice not found.' });
+  }
+
+  const {
+    title,
+    message,
+    category,
+    priority,
+    status,
+    affectedLocationId,
+    locationName,
+    scheduledAt,
+    expiresAt,
+    startTime,
+    endTime,
+    active,
+  } = req.body;
+
+  const now = new Date().toISOString();
+
+  if (title !== undefined) notice.title = sanitizeString(title);
+  if (message !== undefined) notice.message = sanitizeString(message);
+  if (category) notice.category = category;
+  if (priority) notice.priority = priority;
+  if (status) {
+    notice.status = status;
+    if (status === 'published' && !notice.publishedAt) {
+      notice.publishedAt = now;
+    }
+  }
+  if (affectedLocationId !== undefined) notice.affectedLocationId = sanitizeString(affectedLocationId);
+  if (locationName !== undefined) notice.locationName = sanitizeString(locationName);
+  if (scheduledAt !== undefined) notice.scheduledAt = scheduledAt;
+  if (expiresAt !== undefined) notice.expiresAt = expiresAt;
+  if (startTime !== undefined) notice.startTime = startTime;
+  if (endTime !== undefined) notice.endTime = endTime;
+  if (typeof active === 'boolean') notice.active = active;
+
+  notice.updatedAt = now;
+  notice.authorUid = (req as any).user?.uid || notice.authorUid;
+
+  res.json(notice);
 });
 
 app.patch('/api/notices/:id', requireAdminAuth, (req, res) => {
@@ -499,6 +657,10 @@ app.patch('/api/notices/:id', requireAdminAuth, (req, res) => {
   if (typeof req.body.active === 'boolean') {
     notice.active = req.body.active;
   }
+  if (req.body.status) {
+    notice.status = req.body.status;
+  }
+  notice.updatedAt = new Date().toISOString();
 
   res.json(notice);
 });
@@ -512,7 +674,7 @@ app.delete('/api/notices/:id', requireAdminAuth, (req, res) => {
     return res.status(404).json({ error: 'Notice not found.' });
   }
 
-  res.json({ success: true });
+  res.json({ success: true, message: 'Notice deleted successfully.' });
 });
 
 // 7. Server-Side Custom Claims & Role Assignment

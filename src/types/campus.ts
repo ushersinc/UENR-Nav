@@ -12,7 +12,7 @@ export type CampusCategory =
   | 'sports_recreation'
   | 'auditorium';
 
-export type VerificationStatus = 'verified' | 'pending_verification';
+export type VerificationStatus = 'verified' | 'unverified' | 'needs_review' | 'pending_verification';
 
 export interface CampusLocation {
   id: string;
@@ -32,31 +32,11 @@ export interface CampusLocation {
   floorCount?: number;
   contactPhone?: string;
   isCustomAdded?: boolean;
+  source?: string;
+  osmId?: string;
+  verifiedBy?: string;
 }
 
-export interface RouteStep {
-  instruction: string;
-  distance: number; // in meters
-  duration: number; // in seconds
-  location: [number, number]; // [lat, lng]
-  modifier?: string;
-  type?: string;
-}
-
-export interface RouteInfo {
-  coordinates: [number, number][]; // [lat, lng]
-  distance: number; // in meters
-  duration: number; // in seconds
-  steps: RouteStep[];
-  startPoint: {
-    name: string;
-    coordinates: [number, number];
-  };
-  endPoint: {
-    name: string;
-    coordinates: [number, number];
-  };
-}
 
 export interface CampusReport {
   id: string;
@@ -75,14 +55,83 @@ export interface CampusReport {
   status: 'pending' | 'resolved' | 'dismissed';
 }
 
+export type NoticeCategory =
+  | 'General'
+  | 'Academic'
+  | 'Events'
+  | 'Maintenance'
+  | 'Safety'
+  | 'Emergency';
+
+export type NoticePriority = 'Normal' | 'Important' | 'Urgent';
+
+export type NoticeStatus = 'draft' | 'scheduled' | 'published' | 'archived';
+
 export interface CampusNotice {
   id: string;
   title: string;
   message: string;
-  type: 'warning' | 'info' | 'critical' | 'event';
+  category: NoticeCategory;
+  priority: NoticePriority;
+  status: NoticeStatus;
+  type?: 'warning' | 'info' | 'critical' | 'event'; // Legacy compatibility
   affectedLocationId?: string;
+  locationName?: string;
   postedDate: string;
+  publishedAt?: string;
+  scheduledAt?: string;
+  expiresAt?: string;
+  startTime?: string;
+  endTime?: string;
+  authorUid?: string;
   active: boolean;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export type AccessibilitySurface = 'paved' | 'asphalt' | 'concrete' | 'dirt' | 'unknown';
+export type AccessibilitySlope = 'flat' | 'moderate' | 'steep' | 'unknown';
+export type RoutingPreference = 'all' | 'step_free' | 'wheelchair' | 'avoid_stairs';
+
+export interface RouteAccessibilityInfo {
+  isStepFree: boolean;
+  hasStairs: boolean;
+  maxSlope: AccessibilitySlope;
+  hasUnpavedSegments: boolean;
+  isVerifiedAccessible: boolean;
+  accessibilityWarnings: string[];
+  routeNotice?: string;
+  surfaceSummary: string;
+}
+
+export interface RouteStep {
+  instruction: string;
+  distance: number; // in meters
+  duration: number; // in seconds
+  location: [number, number]; // [lat, lng]
+  modifier?: string;
+  type?: string;
+  accessibilityNote?: string;
+}
+
+export interface RouteInfo {
+  coordinates: [number, number][]; // [lat, lng]
+  distance: number; // in meters
+  duration: number; // in seconds
+  steps: RouteStep[];
+  isEstimatedRoute?: boolean;
+  routeNotice?: string;
+  accessibility?: RouteAccessibilityInfo;
+  preferenceUsed?: RoutingPreference;
+  noAccessibleRouteFound?: boolean;
+  startPoint: {
+    name: string;
+    coordinates: [number, number];
+  };
+  endPoint: {
+    name: string;
+    coordinates: [number, number];
+  };
 }
 
 export interface CategoryMeta {
@@ -93,3 +142,4 @@ export interface CategoryMeta {
   borderColor: string;
   iconName: string;
 }
+

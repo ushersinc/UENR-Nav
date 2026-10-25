@@ -20,6 +20,8 @@ interface HeaderProps {
   onOpenAdmin: () => void;
   onOpenSchematic: () => void;
   onOpenAuth: () => void;
+  onOpenAnnouncements: () => void;
+  unreadCount: number;
   notices: CampusNotice[];
   onSelectNotice?: (notice: CampusNotice) => void;
 }
@@ -29,6 +31,8 @@ export const Header: React.FC<HeaderProps> = ({
   onOpenAdmin,
   onOpenSchematic,
   onOpenAuth,
+  onOpenAnnouncements,
+  unreadCount,
   notices,
   onSelectNotice,
 }) => {
@@ -98,7 +102,7 @@ export const Header: React.FC<HeaderProps> = ({
             <span className="sm:hidden">Freshers</span>
           </button>
 
-          {/* Campus Notices / Alerts Dropdown */}
+          {/* Campus Announcements & Notices Button */}
           <div className="relative">
             <button
               onClick={() => {
@@ -109,11 +113,13 @@ export const Header: React.FC<HeaderProps> = ({
               title="Campus announcements & notices"
             >
               <Bell className="w-4 h-4" />
-              {activeNotices.length > 0 && (
+              {unreadCount > 0 ? (
                 <span className="absolute -top-1 -right-1 w-4 h-4 bg-[#D7F36A] text-[#176B45] text-[10px] font-bold rounded-full flex items-center justify-center shadow">
-                  {activeNotices.length}
+                  {unreadCount}
                 </span>
-              )}
+              ) : activeNotices.length > 0 ? (
+                <span className="absolute top-1.5 right-1.5 w-2 h-2 bg-[#D7F36A] rounded-full" />
+              ) : null}
             </button>
 
             {showNoticesMenu && (
@@ -122,36 +128,57 @@ export const Header: React.FC<HeaderProps> = ({
                   <div className="flex items-center gap-2">
                     <Bell className="w-4 h-4 text-[#176B45]" />
                     <span className="font-semibold text-sm">Campus Notices</span>
+                    {unreadCount > 0 && (
+                      <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-emerald-100 text-emerald-800 font-bold">
+                        {unreadCount} new
+                      </span>
+                    )}
                   </div>
-                  <button
-                    onClick={() => setShowNoticesMenu(false)}
-                    className="p-1 text-slate-400 hover:text-slate-600 rounded"
-                  >
-                    <X className="w-4 h-4" />
-                  </button>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => {
+                        setShowNoticesMenu(false);
+                        onOpenAnnouncements();
+                      }}
+                      className="text-xs text-[#176B45] hover:underline font-semibold"
+                    >
+                      View All
+                    </button>
+                    <button
+                      onClick={() => setShowNoticesMenu(false)}
+                      className="p-1 text-slate-400 hover:text-slate-600 rounded"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
                 </div>
+
                 <div className="max-h-72 overflow-y-auto divide-y divide-black/5">
                   {activeNotices.length === 0 ? (
                     <div className="p-4 text-center text-xs text-slate-500">
                       No active campus notices at this time. All pathways clear.
                     </div>
                   ) : (
-                    activeNotices.map((notice) => (
+                    activeNotices.slice(0, 4).map((notice) => (
                       <div
                         key={notice.id}
                         onClick={() => {
-                          onSelectNotice?.(notice);
                           setShowNoticesMenu(false);
+                          if (onSelectNotice) {
+                            onSelectNotice(notice);
+                          } else {
+                            onOpenAnnouncements();
+                          }
                         }}
                         className="p-3 hover:bg-slate-50 transition-colors cursor-pointer text-left"
                       >
                         <div className="flex items-center justify-between text-xs mb-1">
                           <span
                             className={`font-semibold ${
-                              notice.type === 'warning'
-                                ? 'text-amber-700'
-                                : notice.type === 'critical'
+                              notice.priority === 'Urgent' || notice.type === 'critical'
                                 ? 'text-red-700'
+                                : notice.priority === 'Important' || notice.type === 'warning'
+                                ? 'text-amber-700'
                                 : 'text-[#176B45]'
                             }`}
                           >
@@ -159,10 +186,22 @@ export const Header: React.FC<HeaderProps> = ({
                           </span>
                           <span className="text-[10px] text-slate-400">{notice.postedDate}</span>
                         </div>
-                        <p className="text-xs text-slate-600 leading-relaxed">{notice.message}</p>
+                        <p className="text-xs text-slate-600 leading-relaxed line-clamp-2">{notice.message}</p>
                       </div>
                     ))
                   )}
+                </div>
+
+                <div className="px-3 pt-2 pb-1 border-t border-black/5">
+                  <button
+                    onClick={() => {
+                      setShowNoticesMenu(false);
+                      onOpenAnnouncements();
+                    }}
+                    className="w-full py-1.5 rounded-lg bg-[#176B45] text-white hover:bg-[#125537] text-xs font-semibold text-center transition-colors"
+                  >
+                    Open Announcements Center
+                  </button>
                 </div>
               </div>
             )}
@@ -244,11 +283,19 @@ export const Header: React.FC<HeaderProps> = ({
                 className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-white/10 hover:bg-white/20 text-white transition-colors border border-white/10 text-xs font-semibold"
                 title="Account profile"
               >
-                <div className="w-5 h-5 rounded-full bg-[#D7F36A] text-[#176B45] flex items-center justify-center text-[10px] font-bold">
-                  {(userProfile?.displayName || currentUser.email || 'U')[0].toUpperCase()}
-                </div>
+                {userProfile?.photoURL || currentUser.photoURL ? (
+                  <img
+                    src={userProfile?.photoURL || currentUser.photoURL || ''}
+                    alt={userProfile?.displayName || 'User'}
+                    className="w-5 h-5 rounded-full object-cover border border-white/30"
+                  />
+                ) : (
+                  <div className="w-5 h-5 rounded-full bg-[#D7F36A] text-[#176B45] flex items-center justify-center text-[10px] font-bold">
+                    {(userProfile?.displayName || currentUser.displayName || currentUser.email || 'U')[0].toUpperCase()}
+                  </div>
+                )}
                 <span className="hidden sm:inline max-w-[90px] truncate">
-                  {userProfile?.displayName || 'My Account'}
+                  {userProfile?.displayName || currentUser.displayName || 'My Account'}
                 </span>
               </button>
 

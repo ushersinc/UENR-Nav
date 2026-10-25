@@ -2,23 +2,26 @@ import React, { createContext, useContext, useEffect, useState } from 'react';
 import {
   User as FirebaseUser,
   onAuthStateChanged,
-  signInWithEmailAndPassword,
-  createUserWithEmailAndPassword,
+  GoogleAuthProvider,
+  signInWithPopup,
+  signInWithRedirect,
+  getRedirectResult,
   signOut as firebaseSignOut,
-  sendPasswordResetEmail,
-  updateProfile,
 } from 'firebase/auth';
-import { doc, getDoc, setDoc, serverTimestamp } from 'firebase/firestore';
+import { doc, getDoc, setDoc } from 'firebase/firestore';
 import { auth, db } from '../lib/firebase';
 
 export interface UserProfile {
   uid: string;
   email: string | null;
   displayName: string | null;
+  photoURL?: string | null;
   role: 'student' | 'lecturer' | 'staff' | 'admin' | 'visitor';
   isAdmin: boolean;
   department?: string;
   studentId?: string;
+  createdAt?: string;
+  lastLoginAt?: string;
 }
 
 interface AuthContextType {
@@ -26,17 +29,8 @@ interface AuthContextType {
   userProfile: UserProfile | null;
   isAdmin: boolean;
   loading: boolean;
-  login: (email: string, pass: string) => Promise<void>;
-  register: (
-    email: string,
-    pass: string,
-    displayName: string,
-    role?: UserProfile['role'],
-    department?: string,
-    studentId?: string
-  ) => Promise<void>;
+  signInWithGoogle: (useRedirect?: boolean) => Promise<void>;
   logout: () => Promise<void>;
-  resetPassword: (email: string) => Promise<void>;
   getIdToken: () => Promise<string | null>;
   refreshAuthToken: () => Promise<void>;
 }
@@ -48,103 +42,139 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [userProfile, setUserProfile] = useState<UserProfile | null>(null);
   const [loading, setLoading] = useState(true);
 
-  // Parse Firebase Auth errors into friendly student messages
+  // Friendly error message converter for Google Sign-In and Firebase Auth
   const formatAuthError = (err: any): string => {
     const code = err?.code || '';
     switch (code) {
-      case 'auth/invalid-credential':
-      case 'auth/wrong-password':
-      case 'auth/user-not-found':
-        return 'Incorrect email or password. Please verify your credentials.';
-      case 'auth/email-already-in-use':
-        return 'An account with this email address already exists. Please sign in instead.';
-      case 'auth/weak-password':
-        return 'Password is too weak. Please use at least 6 characters.';
-      case 'auth/invalid-email':
-        return 'Please enter a valid university or personal email address.';
-      case 'auth/too-many-requests':
-        return 'Too many unsuccessful attempts. Access temporarily locked; please try again shortly.';
+      case 'auth/popup-closed-by-user':
+        return 'The Google sign-in window was closed before completion. Please click "Continue with Google" to try again.';
+      case 'auth/cancelled-popup-request':
+        return 'Sign-in window already in progress. Please check your open windows or browser tabs.';
+      case 'auth/popup-blocked':
+        return 'Your browser blocked the Google sign-in popup. Please enable popups or select "Use Full-Page Redirect".';
+      case 'auth/operation-not-allowed':
+        return 'Google Sign-In is not enabled yet in the Firebase Console. Please enable "Google" under Authentication > Sign-in method.';
+      case 'auth/unauthorized-domain':
+        return 'This domain is not authorized in Firebase Console. Please add your preview or hosting domain under Authentication > Settings > Authorized domains.';
+      case 'auth/network-request-failed':
+        return 'Network connection problem. Please verify your internet connection.';
+      case 'auth/account-exists-with-different-credential':
+        return 'An account already exists with this email address. Please sign in with your primary credential.';
       default:
-        return err?.message || 'Authentication error occurred. Please check your network.';
+        return err?.message || 'Authentication failed. Please check your connection and try again.';
     }
   };
 
+  // Check for redirect result on app load (handles mobile / popup-blocked environments)
+  useEffect(() => {
+    getRedirectResult(auth)
+      .then((result) => {
+        if (result?.user) {
+          console.log('Google redirect sign-in completed for:', result.user.email);
+        }
+      })
+      .catch((err) => {
+        console.warn('Redirect sign-in notice:', err);
+      });
+  }, []);
+
+  // Listen to auth state changes and synchronize user profile safely with Firestore
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (user) => {
       setCurrentUser(user);
 
       if (user) {
         try {
-          // Check token custom claims (for server-assigned admin privileges)
-          const tokenResult = await user.getIdTokenResult(true);
-          const isEmailVerified = user.emailVerified === true;
-          const isInstitutionalAdmin =
-            isEmailVerified &&
-            (user.email?.toLowerCase() === 'admin@uenr.edu.gh' ||
-             user.email?.toLowerCase() === 'ushersincoperated@gmail.com');
-
+          // Check server-assigned custom claims (the ONLY valid source of admin privileges)
+          const tokenResult = await user.getIdTokenResult();
           const hasAdminClaim =
             tokenResult.claims.admin === true ||
-            tokenResult.claims.role === 'admin' ||
-            isInstitutionalAdmin;
+            tokenResult.claims.role === 'admin';
 
-          // Fetch user document from Firestore
           const userDocRef = doc(db, 'users', user.uid);
           const userSnap = await getDoc(userDocRef);
 
           if (userSnap.exists()) {
             const data = userSnap.data();
-            // CRITICAL: A Firestore document 'role' field can NEVER grant or spoof admin privileges
+            // Client-supplied document fields can NEVER override custom claims for admin rights
             const effectiveRole: UserProfile['role'] = hasAdminClaim
               ? 'admin'
               : data.role === 'admin'
               ? 'student'
               : data.role || 'student';
 
-            setUserProfile({
+            const profile: UserProfile = {
               uid: user.uid,
               email: user.email,
-              displayName: user.displayName || data.displayName || 'UENR Student',
+              displayName: data.displayName || user.displayName || 'UENR Member',
+              photoURL: user.photoURL || data.photoURL || null,
               role: effectiveRole,
               isAdmin: hasAdminClaim,
               department: data.department || '',
               studentId: data.studentId || '',
-            });
-          } else {
-            // New user document stub
-            const initialRole: UserProfile['role'] = hasAdminClaim ? 'admin' : 'student';
-            const profileData: UserProfile = {
-              uid: user.uid,
-              email: user.email,
-              displayName: user.displayName || 'UENR Member',
-              role: initialRole,
-              isAdmin: hasAdminClaim,
+              createdAt: data.createdAt,
+              lastLoginAt: new Date().toISOString(),
             };
+
+            // Safely update last login and latest Google avatar without touching favorites or custom metadata
             await setDoc(
               userDocRef,
               {
-                ...profileData,
-                createdAt: new Date().toISOString(),
+                email: user.email,
+                displayName: profile.displayName,
+                photoURL: profile.photoURL,
+                lastLoginAt: new Date().toISOString(),
                 updatedAt: new Date().toISOString(),
               },
               { merge: true }
             );
 
-            setUserProfile(profileData);
+            setUserProfile(profile);
+          } else {
+            // First-time user profile creation
+            const initialRole: UserProfile['role'] = hasAdminClaim ? 'admin' : 'student';
+            const newProfile: UserProfile = {
+              uid: user.uid,
+              email: user.email,
+              displayName: user.displayName || 'UENR Member',
+              photoURL: user.photoURL || null,
+              role: initialRole,
+              isAdmin: hasAdminClaim,
+              createdAt: new Date().toISOString(),
+              lastLoginAt: new Date().toISOString(),
+            };
+
+            await setDoc(
+              userDocRef,
+              {
+                uid: newProfile.uid,
+                email: newProfile.email,
+                displayName: newProfile.displayName,
+                photoURL: newProfile.photoURL,
+                role: initialRole,
+                createdAt: newProfile.createdAt,
+                lastLoginAt: newProfile.lastLoginAt,
+                updatedAt: newProfile.lastLoginAt,
+              },
+              { merge: true }
+            );
+
+            setUserProfile(newProfile);
           }
         } catch (error) {
-          console.warn('Error fetching user profile from Firestore:', error);
-          const isInstitutionalAdmin =
-            user.emailVerified === true &&
-            (user.email?.toLowerCase() === 'admin@uenr.edu.gh' ||
-             user.email?.toLowerCase() === 'ushersincoperated@gmail.com');
+          console.warn('Firestore user profile sync warning (offline or permissions):', error);
+          const tokenResult = await user.getIdTokenResult().catch(() => null);
+          const hasAdminClaim =
+            tokenResult?.claims?.admin === true ||
+            tokenResult?.claims?.role === 'admin';
 
           setUserProfile({
             uid: user.uid,
             email: user.email,
-            displayName: user.displayName || 'UENR Student',
-            role: isInstitutionalAdmin ? 'admin' : 'student',
-            isAdmin: isInstitutionalAdmin,
+            displayName: user.displayName || 'UENR Member',
+            photoURL: user.photoURL || null,
+            role: hasAdminClaim ? 'admin' : 'student',
+            isAdmin: !!hasAdminClaim,
           });
         }
       } else {
@@ -157,38 +187,32 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     return unsubscribe;
   }, []);
 
-  const login = async (email: string, pass: string) => {
-    try {
-      await signInWithEmailAndPassword(auth, email.trim(), pass);
-    } catch (err: any) {
-      throw new Error(formatAuthError(err));
-    }
-  };
+  // Primary Google Sign-In Method with automatic popup fallback to redirect
+  const signInWithGoogle = async (useRedirect = false): Promise<void> => {
+    const provider = new GoogleAuthProvider();
+    provider.setCustomParameters({
+      prompt: 'select_account',
+    });
 
-  const register = async (
-    email: string,
-    pass: string,
-    displayName: string,
-    role: UserProfile['role'] = 'student',
-    department: string = '',
-    studentId: string = ''
-  ) => {
     try {
-      const res = await createUserWithEmailAndPassword(auth, email.trim(), pass);
-      await updateProfile(res.user, { displayName: displayName.trim() });
+      if (useRedirect) {
+        await signInWithRedirect(auth, provider);
+        return;
+      }
 
-      // Create profile document in Firestore
-      const userDocRef = doc(db, 'users', res.user.uid);
-      await setDoc(userDocRef, {
-        uid: res.user.uid,
-        email: email.trim(),
-        displayName: displayName.trim(),
-        role: role === 'admin' ? 'student' : role, // Prevent self-declaring admin
-        department: department.trim(),
-        studentId: studentId.trim(),
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-      });
+      try {
+        await signInWithPopup(auth, provider);
+      } catch (popupErr: any) {
+        if (
+          popupErr.code === 'auth/popup-blocked' ||
+          popupErr.code === 'auth/operation-not-supported-in-this-environment'
+        ) {
+          console.warn('Popup restricted, falling back to signInWithRedirect:', popupErr.code);
+          await signInWithRedirect(auth, provider);
+          return;
+        }
+        throw popupErr;
+      }
     } catch (err: any) {
       throw new Error(formatAuthError(err));
     }
@@ -199,14 +223,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setUserProfile(null);
   };
 
-  const resetPassword = async (email: string) => {
-    try {
-      await sendPasswordResetEmail(auth, email.trim());
-    } catch (err: any) {
-      throw new Error(formatAuthError(err));
-    }
-  };
-
   const getIdToken = async (): Promise<string | null> => {
     if (!auth.currentUser) return null;
     return auth.currentUser.getIdToken();
@@ -215,16 +231,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const refreshAuthToken = async () => {
     if (auth.currentUser) {
       const tokenResult = await auth.currentUser.getIdTokenResult(true);
-      const isEmailVerified = auth.currentUser.emailVerified === true;
-      const isInstitutionalAdmin =
-        isEmailVerified &&
-        (auth.currentUser.email?.toLowerCase() === 'admin@uenr.edu.gh' ||
-         auth.currentUser.email?.toLowerCase() === 'ushersincoperated@gmail.com');
-
       const hasAdmin =
         tokenResult.claims.admin === true ||
-        tokenResult.claims.role === 'admin' ||
-        isInstitutionalAdmin;
+        tokenResult.claims.role === 'admin';
 
       setUserProfile((prev) =>
         prev
@@ -245,10 +254,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         userProfile,
         isAdmin: !!userProfile?.isAdmin,
         loading,
-        login,
-        register,
+        signInWithGoogle,
         logout,
-        resetPassword,
         getIdToken,
         refreshAuthToken,
       }}

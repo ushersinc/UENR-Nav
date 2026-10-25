@@ -10,6 +10,7 @@ import { ReportIssueModal } from './components/ReportIssueModal';
 import { AdminPanelModal } from './components/AdminPanelModal';
 import { SchematicMapModal } from './components/SchematicMapModal';
 import { AuthModal } from './components/AuthModal';
+import { AnnouncementsModal } from './components/AnnouncementsModal';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import {
   CampusCategory,
@@ -17,6 +18,7 @@ import {
   CampusNotice,
   CampusReport,
   RouteInfo,
+  RoutingPreference,
 } from './types/campus';
 import { CATEGORY_METAS } from './data/campusLocations';
 import {
@@ -31,6 +33,8 @@ import {
   fetchNotices,
   fetchReports,
   getStoredReports,
+  getReadNoticeIds,
+  filterVisibleNotices,
 } from './services/storageService';
 import { calculatePedestrianRoute } from './services/routingService';
 import {
@@ -76,15 +80,20 @@ export default function App() {
   const [userAccuracy, setUserAccuracy] = useState<number | null>(null);
   const [locationError, setLocationError] = useState<string | null>(null);
 
-  // Pedestrian Routing
+  // Pedestrian & Accessible Routing
   const [isDirectionsActive, setIsDirectionsActive] = useState(false);
+  const [routingPreference, setRoutingPreference] = useState<RoutingPreference>('all');
   const [routeStart, setRouteStart] = useState<{ name: string; coordinates: [number, number] }>({
     name: 'Main Campus Gate',
-    coordinates: [7.3510, -2.3496],
+    coordinates: [7.34919, -2.34382],
   });
   const [route, setRoute] = useState<RouteInfo | null>(null);
   const [isCalculatingRoute, setIsCalculatingRoute] = useState(false);
   const [isPickingOnMap, setIsPickingOnMap] = useState(false);
+
+  // Announcements & Notifications
+  const [isAnnouncementsOpen, setIsAnnouncementsOpen] = useState(false);
+  const [readNoticeIds, setReadNoticeIds] = useState<string[]>(() => getReadNoticeIds());
 
   // Modals
   const [isFreshersGuideOpen, setIsFreshersGuideOpen] = useState(false);
@@ -117,7 +126,7 @@ export default function App() {
 
     // If directions are active, update the destination
     if (isDirectionsActive) {
-      computeRoute(routeStart, { name: loc.name, coordinates: [loc.lat, loc.lng] });
+      computeRoute(routeStart, { name: loc.name, coordinates: [loc.lat, loc.lng] }, routingPreference);
     }
   };
 
@@ -129,20 +138,21 @@ export default function App() {
     // Determine initial start point
     const initialStart = userLocation
       ? { name: 'My Current Location (GPS)', coordinates: userLocation }
-      : { name: 'Main Campus Gate', coordinates: [7.3510, -2.3496] as [number, number] };
+      : { name: 'Main Campus Gate', coordinates: [7.34919, -2.34382] as [number, number] };
 
     setRouteStart(initialStart);
-    computeRoute(initialStart, { name: dest.name, coordinates: [dest.lat, dest.lng] });
+    computeRoute(initialStart, { name: dest.name, coordinates: [dest.lat, dest.lng] }, routingPreference);
   };
 
-  // Compute pedestrian walking route
+  // Compute pedestrian or accessible walking route
   const computeRoute = async (
     start: { name: string; coordinates: [number, number] },
-    end: { name: string; coordinates: [number, number] }
+    end: { name: string; coordinates: [number, number] },
+    pref: RoutingPreference = routingPreference
   ) => {
     setIsCalculatingRoute(true);
     try {
-      const calculatedRoute = await calculatePedestrianRoute(start, end);
+      const calculatedRoute = await calculatePedestrianRoute(start, end, { preference: pref });
       setRoute(calculatedRoute);
     } catch (err) {
       console.error('Route calculation error:', err);
@@ -230,73 +240,92 @@ export default function App() {
     }
   }, [locations]);
 
-  return (
-    <AuthProvider>
-      <div className="flex flex-col h-screen w-screen overflow-hidden bg-[#F5F7F4] text-[#263238] select-none">
-        {/* Top Header */}
-        <Header
-          onOpenFreshersGuide={() => setIsFreshersGuideOpen(true)}
-          onOpenAdmin={() => setIsAdminOpen(true)}
-          onOpenSchematic={() => setIsSchematicOpen(true)}
-          onOpenAuth={() => setIsAuthModalOpen(true)}
-          notices={notices}
-        />
+    const unreadNoticesCount = useMemo(() => {
+      return filterVisibleNotices(notices, false).filter((n) => !readNoticeIds.includes(n.id)).length;
+    }, [notices, readNoticeIds]);
 
-      {/* Main Workspace Layout */}
-      <div className="flex-1 flex flex-col md:flex-row relative overflow-hidden">
-        {/* Left Sidebar (Desktop: 380px - 440px / Mobile: Collapsible bottom panel) */}
-        <aside className="hidden md:flex flex-col w-[400px] lg:w-[440px] bg-white border-r border-black/10 shadow-lg z-20 overflow-hidden shrink-0">
-          {/* Search Bar Container */}
-          <div className="p-3.5 border-b border-black/5 bg-white">
-            <SearchBar
-              locations={locations}
-              onSelectLocation={handleSelectLocation}
-              recentSearches={recentSearches}
-              onSelectRecentSearch={(term) => {
-                setRecentSearches(addRecentSearch(term));
-              }}
-              onClearRecents={() => {
-                clearRecentSearches();
-                setRecentSearches([]);
-              }}
-            />
-          </div>
-
-          {/* Category Shortcuts */}
-          <CategoryFilter
-            selectedCategory={selectedCategory}
-            onSelectCategory={setSelectedCategory}
-            categoryCounts={categoryCounts}
+    return (
+      <AuthProvider>
+        <div className="flex flex-col h-screen w-screen overflow-hidden bg-[#F5F7F4] text-[#263238] select-none">
+          {/* Top Header */}
+          <Header
+            onOpenFreshersGuide={() => setIsFreshersGuideOpen(true)}
+            onOpenAdmin={() => setIsAdminOpen(true)}
+            onOpenSchematic={() => setIsSchematicOpen(true)}
+            onOpenAuth={() => setIsAuthModalOpen(true)}
+            onOpenAnnouncements={() => setIsAnnouncementsOpen(true)}
+            unreadCount={unreadNoticesCount}
+            notices={notices}
+            onSelectNotice={() => setIsAnnouncementsOpen(true)}
           />
 
-          {/* Dynamic Content: Directions Panel, Location Detail Card, or Explorer List */}
-          <div className="flex-1 overflow-y-auto">
-            {isDirectionsActive && selectedLocation ? (
-              <div className="p-3">
-                <DirectionsPanel
-                  route={route}
-                  locations={locations}
-                  destination={selectedLocation}
-                  startPoint={routeStart}
-                  userLocation={userLocation}
-                  isLoading={isCalculatingRoute}
-                  onSelectStartLocation={(newStart) => {
-                    setRouteStart(newStart);
-                    computeRoute(newStart, {
-                      name: selectedLocation.name,
-                      coordinates: [selectedLocation.lat, selectedLocation.lng],
-                    });
-                  }}
-                  onSwapPoints={handleSwapRoutePoints}
-                  onClearDirections={() => {
-                    setIsDirectionsActive(false);
-                    setRoute(null);
-                  }}
-                  onEnablePickOnMap={() => setIsPickingOnMap(!isPickingOnMap)}
-                  isPickingOnMap={isPickingOnMap}
-                />
-              </div>
-            ) : selectedLocation ? (
+        {/* Main Workspace Layout */}
+        <div className="flex-1 flex flex-col md:flex-row relative overflow-hidden">
+          {/* Left Sidebar (Desktop: 380px - 440px / Mobile: Collapsible bottom panel) */}
+          <aside className="hidden md:flex flex-col w-[400px] lg:w-[440px] bg-white border-r border-black/10 shadow-lg z-20 overflow-hidden shrink-0">
+            {/* Search Bar Container */}
+            <div className="p-3.5 border-b border-black/5 bg-white">
+              <SearchBar
+                locations={locations}
+                onSelectLocation={handleSelectLocation}
+                recentSearches={recentSearches}
+                onSelectRecentSearch={(term) => {
+                  setRecentSearches(addRecentSearch(term));
+                }}
+                onClearRecents={() => {
+                  clearRecentSearches();
+                  setRecentSearches([]);
+                }}
+              />
+            </div>
+
+            {/* Category Shortcuts */}
+            <CategoryFilter
+              selectedCategory={selectedCategory}
+              onSelectCategory={setSelectedCategory}
+              categoryCounts={categoryCounts}
+            />
+
+            {/* Dynamic Content: Directions Panel, Location Detail Card, or Explorer List */}
+            <div className="flex-1 overflow-y-auto">
+              {isDirectionsActive && selectedLocation ? (
+                <div className="p-3">
+                  <DirectionsPanel
+                    route={route}
+                    locations={locations}
+                    destination={selectedLocation}
+                    startPoint={routeStart}
+                    userLocation={userLocation}
+                    isLoading={isCalculatingRoute}
+                    routingPreference={routingPreference}
+                    onChangePreference={(newPref) => {
+                      setRoutingPreference(newPref);
+                      if (selectedLocation) {
+                        computeRoute(
+                          routeStart,
+                          { name: selectedLocation.name, coordinates: [selectedLocation.lat, selectedLocation.lng] },
+                          newPref
+                        );
+                      }
+                    }}
+                    onSelectStartLocation={(newStart) => {
+                      setRouteStart(newStart);
+                      computeRoute(
+                        newStart,
+                        { name: selectedLocation.name, coordinates: [selectedLocation.lat, selectedLocation.lng] },
+                        routingPreference
+                      );
+                    }}
+                    onSwapPoints={handleSwapRoutePoints}
+                    onClearDirections={() => {
+                      setIsDirectionsActive(false);
+                      setRoute(null);
+                    }}
+                    onEnablePickOnMap={() => setIsPickingOnMap(!isPickingOnMap)}
+                    isPickingOnMap={isPickingOnMap}
+                  />
+                </div>
+              ) : selectedLocation ? (
               <div className="p-3">
                 <LocationDetailCard
                   location={selectedLocation}
@@ -482,12 +511,24 @@ export default function App() {
                     startPoint={routeStart}
                     userLocation={userLocation}
                     isLoading={isCalculatingRoute}
+                    routingPreference={routingPreference}
+                    onChangePreference={(newPref) => {
+                      setRoutingPreference(newPref);
+                      if (selectedLocation) {
+                        computeRoute(
+                          routeStart,
+                          { name: selectedLocation.name, coordinates: [selectedLocation.lat, selectedLocation.lng] },
+                          newPref
+                        );
+                      }
+                    }}
                     onSelectStartLocation={(newStart) => {
                       setRouteStart(newStart);
-                      computeRoute(newStart, {
-                        name: selectedLocation.name,
-                        coordinates: [selectedLocation.lat, selectedLocation.lng],
-                      });
+                      computeRoute(
+                        newStart,
+                        { name: selectedLocation.name, coordinates: [selectedLocation.lat, selectedLocation.lng] },
+                        routingPreference
+                      );
                     }}
                     onSwapPoints={handleSwapRoutePoints}
                     onClearDirections={() => {
@@ -579,6 +620,24 @@ export default function App() {
         <AuthModal
           isOpen={isAuthModalOpen}
           onClose={() => setIsAuthModalOpen(false)}
+        />
+
+        {/* Campus Announcements & Notifications Modal */}
+        <AnnouncementsModal
+          isOpen={isAnnouncementsOpen}
+          onClose={() => setIsAnnouncementsOpen(false)}
+          notices={notices}
+          readNoticeIds={readNoticeIds}
+          onUpdateReadNoticeIds={setReadNoticeIds}
+          locations={locations}
+          onSelectLocationOnMap={(loc) => {
+            setIsAnnouncementsOpen(false);
+            handleSelectLocation(loc);
+          }}
+          onGetDirectionsToLocation={(loc) => {
+            setIsAnnouncementsOpen(false);
+            handleGetDirections(loc);
+          }}
         />
       </div>
     </AuthProvider>

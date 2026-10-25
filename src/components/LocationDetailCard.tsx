@@ -111,24 +111,37 @@ export const LocationDetailCard: React.FC<LocationDetailCardProps> = ({
 
       {/* Main Content Area */}
       <div className="p-4 sm:p-5 overflow-y-auto space-y-4 text-xs sm:text-sm">
-        {/* Verification Status & Aliases */}
-        <div className="flex items-center justify-between gap-2 pb-2 border-b border-black/5 text-xs">
-          <div className="flex items-center gap-1.5">
-            {location.verificationStatus === 'verified' ? (
-              <div className="flex items-center gap-1 text-[#176B45] font-semibold">
-                <CheckCircle2 className="w-4 h-4" />
-                <span>Verified UENR Coordinates</span>
-              </div>
-            ) : (
-              <div className="flex items-center gap-1 text-amber-600 font-semibold">
-                <AlertCircle className="w-4 h-4" />
-                <span>Awaiting Field Calibration</span>
-              </div>
-            )}
+        {/* Verification Status, Coordinates & Source */}
+        <div className="p-2.5 rounded-xl bg-slate-50 border border-slate-200/80 space-y-1.5 text-xs">
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-1.5">
+              {location.verificationStatus === 'verified' ? (
+                <div className="flex items-center gap-1 text-emerald-700 font-semibold">
+                  <CheckCircle2 className="w-4 h-4 text-emerald-600" />
+                  <span>Verified Coordinates</span>
+                </div>
+              ) : location.verificationStatus === 'needs_review' ? (
+                <div className="flex items-center gap-1 text-amber-600 font-semibold">
+                  <AlertCircle className="w-4 h-4 text-amber-500" />
+                  <span>Needs Field Review</span>
+                </div>
+              ) : (
+                <div className="flex items-center gap-1 text-slate-500 font-semibold">
+                  <AlertCircle className="w-4 h-4 text-slate-400" />
+                  <span>Unverified Pin</span>
+                </div>
+              )}
+            </div>
+            <span className="text-[11px] text-slate-500 font-mono">
+              {location.lat.toFixed(5)}° N, {Math.abs(location.lng).toFixed(5)}° W
+            </span>
           </div>
-          <span className="text-[11px] text-slate-400">
-            Verified {location.lastVerified}
-          </span>
+          {location.source && (
+            <div className="text-[11px] text-slate-600 flex items-center gap-1 pt-1 border-t border-slate-200/60">
+              <span className="font-semibold text-slate-700">Source:</span>
+              <span className="truncate">{location.source}</span>
+            </div>
+          )}
         </div>
 
         {/* Also Known As */}

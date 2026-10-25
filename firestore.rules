@@ -59,11 +59,14 @@ service cloud.firestore {
     }
 
     function isValidNotice(data) {
-      return data.keys().hasAll(['id', 'title', 'message', 'type', 'active']) &&
+      return data.keys().hasAll(['id', 'title', 'message', 'active']) &&
         data.id is string && isValidId(data.id) &&
         data.title is string && data.title.size() >= 3 && data.title.size() <= 200 &&
-        data.message is string && data.message.size() >= 5 && data.message.size() <= 2000 &&
-        data.type in ['warning', 'info', 'critical', 'event'] &&
+        data.message is string && data.message.size() >= 5 && data.message.size() <= 3000 &&
+        (!('category' in data) || data.category in ['General', 'Academic', 'Events', 'Maintenance', 'Safety', 'Emergency']) &&
+        (!('priority' in data) || data.priority in ['Normal', 'Important', 'Urgent']) &&
+        (!('status' in data) || data.status in ['draft', 'scheduled', 'published', 'archived']) &&
+        (!('type' in data) || data.type in ['warning', 'info', 'critical', 'event']) &&
         data.active is bool;
     }
 
@@ -117,6 +120,11 @@ service cloud.firestore {
         allow create, update: if isOwner(userId) && isValidId(userId) && isValidId(placeId) && isValidFavorite(request.resource.data);
         allow delete: if isOwner(userId) && isValidId(userId) && isValidId(placeId);
       }
+
+      // User read notices subcollection: strictly isolated to document owner
+      match /read_notices/{noticeId} {
+        allow read, write: if isOwner(userId) && isValidId(userId) && isValidId(noticeId);
+      }
     }
 
     // =========================================================================
@@ -138,11 +146,11 @@ service cloud.firestore {
     }
 
     // =========================================================================
-    // 3. CAMPUS NOTICES & ALERTS
+    // 3. CAMPUS NOTICES & ANNOUNCEMENTS
     // =========================================================================
     match /notices/{noticeId} {
-      // Public can read active alerts; admins can read all
-      allow read: if (resource.data.active == true) || isAdmin();
+      // Public can read published active notices; admins can read all
+      allow read: if (resource.data.active == true && (!('status' in resource.data) || resource.data.status == 'published')) || isAdmin();
 
       // Only administrators can create, update, toggle, or delete notices
       allow create, update: if isAdmin() && isValidId(noticeId) && isValidNotice(request.resource.data);

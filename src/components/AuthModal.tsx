@@ -1,56 +1,42 @@
 import React, { useState } from 'react';
-import { X, Lock, Mail, User, BookOpen, AlertCircle, CheckCircle2, Loader2, ArrowRight } from 'lucide-react';
-import { useAuth, UserProfile } from '../context/AuthContext';
+import {
+  X,
+  ShieldCheck,
+  AlertCircle,
+  CheckCircle2,
+  Loader2,
+  Compass,
+  Bookmark,
+  MapPin,
+  FileText,
+  Smartphone,
+} from 'lucide-react';
+import { useAuth } from '../context/AuthContext';
 
 interface AuthModalProps {
   isOpen: boolean;
   onClose: () => void;
-  initialMode?: 'signin' | 'register';
 }
 
-export const AuthModal: React.FC<AuthModalProps> = ({
-  isOpen,
-  onClose,
-  initialMode = 'signin',
-}) => {
-  const { login, register, resetPassword } = useAuth();
-
-  const [mode, setMode] = useState<'signin' | 'register' | 'forgot'>(initialMode);
-  const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
-  const [displayName, setDisplayName] = useState('');
-  const [role, setRole] = useState<UserProfile['role']>('student');
-  const [department, setDepartment] = useState('');
-  const [studentId, setStudentId] = useState('');
+export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose }) => {
+  const { signInWithGoogle, currentUser, userProfile, logout } = useAuth();
 
   const [loading, setLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
-  const [successMsg, setSuccessMsg] = useState('');
+  const [useRedirectFallback, setUseRedirectFallback] = useState(false);
 
   if (!isOpen) return null;
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleGoogleSignIn = async (forceRedirect: boolean = false) => {
     setErrorMsg('');
-    setSuccessMsg('');
     setLoading(true);
 
     try {
-      if (mode === 'signin') {
-        await login(email, password);
-        onClose();
-      } else if (mode === 'register') {
-        if (!displayName.trim()) {
-          throw new Error('Please enter your full name.');
-        }
-        await register(email, password, displayName, role, department, studentId);
-        onClose();
-      } else if (mode === 'forgot') {
-        await resetPassword(email);
-        setSuccessMsg(`Password reset link sent to ${email}. Please check your inbox.`);
-      }
+      await signInWithGoogle(forceRedirect || useRedirectFallback);
+      // Popup flow resolves successfully; redirect flow navigates away
+      onClose();
     } catch (err: any) {
-      setErrorMsg(err.message || 'Authentication error.');
+      setErrorMsg(err.message || 'Could not complete Google sign in.');
     } finally {
       setLoading(false);
     }
@@ -59,235 +45,189 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-in fade-in duration-200">
       <div className="bg-white rounded-3xl shadow-2xl border border-black/10 w-full max-w-md overflow-hidden flex flex-col max-h-[92vh]">
-        {/* Header */}
-        <div className="bg-[#176B45] text-white p-5 relative">
+        {/* Header with UENR green branding */}
+        <div className="bg-[#176B45] text-white p-5 sm:p-6 relative">
           <button
             onClick={onClose}
             className="absolute top-4 right-4 p-1.5 rounded-full bg-white/10 hover:bg-white/20 text-white transition-colors"
+            aria-label="Close dialog"
           >
             <X className="w-4 h-4" />
           </button>
-          <div className="flex items-center gap-2.5 mb-1">
-            <div className="w-8 h-8 rounded-xl bg-[#D7F36A] text-[#176B45] flex items-center justify-center font-bold">
-              <Lock className="w-4 h-4" />
+
+          <div className="flex items-center gap-3 mb-2">
+            <div className="w-9 h-9 rounded-xl bg-[#D7F36A] text-[#176B45] flex items-center justify-center shadow-inner shrink-0">
+              <Compass className="w-5 h-5" />
             </div>
             <div>
-              <h2 className="font-display font-bold text-lg">
-                {mode === 'signin'
-                  ? 'Sign in to UENR Nav'
-                  : mode === 'register'
-                  ? 'Join UENR Nav'
-                  : 'Reset Your Password'}
+              <h2 className="font-display font-bold text-lg leading-tight">
+                {currentUser ? 'UENR Account Profile' : 'Sign in to UENR Nav'}
               </h2>
+              <span className="text-[11px] text-white/80 font-normal">
+                University of Energy and Natural Resources
+              </span>
             </div>
           </div>
-          <p className="text-xs text-white/80">
-            {mode === 'signin'
-              ? 'Access your saved lecture halls, synced preferences, and campus reports.'
-              : mode === 'register'
-              ? 'Create a student, lecturer, or visitor account to personalize your navigation.'
-              : "We'll send you an official email with a secure link to reset your password."}
-          </p>
 
-          {/* Mode Switcher Tabs */}
-          {mode !== 'forgot' && (
-            <div className="flex bg-black/15 p-1 rounded-xl mt-4">
+          <p className="text-xs text-white/90 leading-relaxed mt-1">
+            {currentUser
+              ? 'Your Google Account is active. Your saved lecture halls and preferences are synchronized.'
+              : 'Sign in with your university (@uenr.edu.gh) or personal Google Account to sync saved lecture halls, bookmark routes, and submit campus reports.'}
+          </p>
+        </div>
+
+        {/* Modal Body */}
+        <div className="p-5 sm:p-6 overflow-y-auto space-y-4 text-xs sm:text-sm">
+          {errorMsg && (
+            <div className="p-3.5 rounded-xl bg-red-50 border border-red-200 text-xs text-red-700 flex items-start gap-2.5 animate-in fade-in">
+              <AlertCircle className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
+              <div className="flex-1">
+                <span className="font-semibold block mb-0.5">Authentication Notice</span>
+                <span>{errorMsg}</span>
+              </div>
+            </div>
+          )}
+
+          {currentUser ? (
+            /* Logged In State */
+            <div className="space-y-4">
+              <div className="p-4 rounded-2xl bg-emerald-50 border border-emerald-200 flex items-start gap-3">
+                {userProfile?.photoURL || currentUser.photoURL ? (
+                  <img
+                    src={userProfile?.photoURL || currentUser.photoURL || ''}
+                    alt={currentUser.displayName || 'Profile'}
+                    className="w-10 h-10 rounded-full object-cover border-2 border-emerald-400 shrink-0"
+                  />
+                ) : (
+                  <div className="w-10 h-10 rounded-full bg-[#176B45] text-white flex items-center justify-center font-bold text-sm shrink-0">
+                    {(currentUser.displayName || currentUser.email || 'U')[0].toUpperCase()}
+                  </div>
+                )}
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-1.5">
+                    <span className="font-bold text-slate-900 truncate">
+                      {currentUser.displayName || 'UENR Member'}
+                    </span>
+                    <CheckCircle2 className="w-4 h-4 text-[#176B45] shrink-0" />
+                  </div>
+                  <div className="text-slate-600 text-xs truncate">{currentUser.email}</div>
+                  <div className="flex items-center gap-1.5 mt-2">
+                    <span className="text-[10px] font-semibold uppercase px-2 py-0.5 rounded bg-emerald-200/60 text-emerald-900">
+                      {userProfile?.role || 'Student'}
+                    </span>
+                    {userProfile?.isAdmin && (
+                      <span className="text-[10px] font-semibold uppercase px-2 py-0.5 rounded bg-amber-200 text-amber-900">
+                        Admin Verified
+                      </span>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              <div className="space-y-2 pt-1">
+                <button
+                  type="button"
+                  onClick={onClose}
+                  className="w-full py-2.5 rounded-xl bg-[#176B45] text-white hover:bg-[#125537] font-semibold text-xs transition-colors shadow-sm"
+                >
+                  Return to Campus Map
+                </button>
+                <button
+                  type="button"
+                  onClick={async () => {
+                    await logout();
+                    onClose();
+                  }}
+                  className="w-full py-2 rounded-xl bg-slate-100 hover:bg-red-50 text-slate-700 hover:text-red-700 font-semibold text-xs transition-colors"
+                >
+                  Sign Out
+                </button>
+              </div>
+            </div>
+          ) : (
+            /* Sign In Flow */
+            <div className="space-y-4">
+              {/* Feature Highlights */}
+              <div className="grid grid-cols-2 gap-2 text-[11px] text-slate-600">
+                <div className="p-2.5 rounded-xl bg-slate-50 border border-slate-100 flex items-center gap-2">
+                  <Bookmark className="w-3.5 h-3.5 text-amber-500 shrink-0" />
+                  <span>Bookmark lecture halls</span>
+                </div>
+                <div className="p-2.5 rounded-xl bg-slate-50 border border-slate-100 flex items-center gap-2">
+                  <MapPin className="w-3.5 h-3.5 text-[#176B45] shrink-0" />
+                  <span>Offline GPS guidance</span>
+                </div>
+                <div className="p-2.5 rounded-xl bg-slate-50 border border-slate-100 flex items-center gap-2">
+                  <FileText className="w-3.5 h-3.5 text-blue-600 shrink-0" />
+                  <span>Submit issue reports</span>
+                </div>
+                <div className="p-2.5 rounded-xl bg-slate-50 border border-slate-100 flex items-center gap-2">
+                  <ShieldCheck className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                  <span>Secure Google SSO</span>
+                </div>
+              </div>
+
+              {/* Primary Google Sign-In Button */}
               <button
                 type="button"
-                onClick={() => {
-                  setMode('signin');
-                  setErrorMsg('');
-                }}
-                className={`flex-1 py-1.5 text-xs font-semibold rounded-lg transition-all ${
-                  mode === 'signin' ? 'bg-white text-[#176B45] shadow-xs' : 'text-white/80 hover:text-white'
-                }`}
+                onClick={() => handleGoogleSignIn(false)}
+                disabled={loading}
+                className="w-full py-3 px-4 rounded-xl border border-slate-300 bg-white hover:bg-slate-50 text-slate-800 font-semibold text-xs sm:text-sm transition-all shadow-sm flex items-center justify-center gap-3 disabled:opacity-50 active:scale-[0.99] cursor-pointer"
               >
-                Sign In
+                {loading ? (
+                  <>
+                    <Loader2 className="w-4 h-4 text-[#176B45] animate-spin" />
+                    <span>Connecting to Google...</span>
+                  </>
+                ) : (
+                  <>
+                    {/* Official Multi-Color Google G SVG Icon */}
+                    <svg className="w-4 h-4 shrink-0" viewBox="0 0 24 24">
+                      <path
+                        fill="#4285F4"
+                        d="M23.745 12.27c0-.7-.06-1.4-.19-2.07H12v4.51h6.6c-.29 1.52-1.14 2.82-2.4 3.68v3.05h3.88c2.27-2.09 3.665-5.17 3.665-9.17z"
+                      />
+                      <path
+                        fill="#34A853"
+                        d="M12 24c3.24 0 5.95-1.08 7.93-2.91l-3.88-3.05c-1.08.72-2.45 1.16-4.05 1.16-3.12 0-5.77-2.1-6.72-4.93H1.25v3.15C3.26 21.36 7.33 24 12 24z"
+                      />
+                      <path
+                        fill="#FBBC05"
+                        d="M5.28 14.27c-.25-.72-.38-1.49-.38-2.27s.13-1.55.38-2.27V6.58H1.25C.45 8.18 0 9.99 0 12s.45 3.82 1.25 5.42l4.03-3.15z"
+                      />
+                      <path
+                        fill="#EA4335"
+                        d="M12 4.75c1.77 0 3.35.61 4.6 1.8l3.42-3.42C17.95 1.19 15.24 0 12 0 7.33 0 3.26 2.64 1.25 6.58l4.03 3.15c.95-2.83 3.6-4.98 6.72-4.98z"
+                      />
+                    </svg>
+                    <span>Continue with Google</span>
+                  </>
+                )}
               </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setMode('register');
-                  setErrorMsg('');
-                }}
-                className={`flex-1 py-1.5 text-xs font-semibold rounded-lg transition-all ${
-                  mode === 'register' ? 'bg-white text-[#176B45] shadow-xs' : 'text-white/80 hover:text-white'
-                }`}
-              >
-                Create Account
-              </button>
+
+              {/* Mobile / Popup-blocked Fallback Option */}
+              <div className="pt-1 text-center">
+                <button
+                  type="button"
+                  onClick={() => handleGoogleSignIn(true)}
+                  disabled={loading}
+                  className="text-[11px] text-slate-500 hover:text-[#176B45] underline flex items-center justify-center gap-1.5 mx-auto"
+                >
+                  <Smartphone className="w-3 h-3" />
+                  <span>On mobile or popup blocked? Use Full-Page Redirect</span>
+                </button>
+              </div>
+
+              {/* Institutional Notice */}
+              <div className="p-3 rounded-xl bg-slate-50 border border-slate-100 text-[11px] text-slate-500 leading-relaxed text-center">
+                <span className="font-semibold text-slate-700 block mb-0.5">
+                  Official UENR Authentication
+                </span>
+                We use Firebase Authentication with official Google Single Sign-On. Existing account bookmarks and saved preferences are preserved automatically.
+              </div>
             </div>
           )}
         </div>
-
-        {/* Body */}
-        <form onSubmit={handleSubmit} className="p-5 sm:p-6 overflow-y-auto space-y-3.5 text-xs sm:text-sm">
-          {errorMsg && (
-            <div className="p-3 rounded-xl bg-red-50 border border-red-200 text-xs text-red-700 flex items-start gap-2">
-              <AlertCircle className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
-              <span>{errorMsg}</span>
-            </div>
-          )}
-
-          {successMsg && (
-            <div className="p-3 rounded-xl bg-emerald-50 border border-emerald-200 text-xs text-emerald-800 flex items-start gap-2">
-              <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
-              <span>{successMsg}</span>
-            </div>
-          )}
-
-          {/* Registration fields */}
-          {mode === 'register' && (
-            <>
-              <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1">Full Name *</label>
-                <div className="relative">
-                  <User className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
-                  <input
-                    type="text"
-                    required
-                    value={displayName}
-                    onChange={(e) => setDisplayName(e.target.value)}
-                    placeholder="e.g. Kwame Mensah"
-                    className="w-full pl-9 pr-3 py-2 bg-[#F5F7F4] border border-black/10 rounded-xl focus:outline-none focus:ring-2 focus:ring-[#176B45]"
-                  />
-                </div>
-              </div>
-
-              <div className="grid grid-cols-2 gap-2">
-                <div>
-                  <label className="block text-xs font-semibold text-slate-700 mb-1">Campus Role</label>
-                  <select
-                    value={role}
-                    onChange={(e) => setRole(e.target.value as any)}
-                    className="w-full px-3 py-2 bg-[#F5F7F4] border border-black/10 rounded-xl text-xs"
-                  >
-                    <option value="student">Student</option>
-                    <option value="lecturer">Lecturer</option>
-                    <option value="staff">Staff</option>
-                    <option value="visitor">Visitor</option>
-                  </select>
-                </div>
-                <div>
-                  <label className="block text-xs font-semibold text-slate-700 mb-1">
-                    {role === 'student' ? 'Index / Student ID' : 'Staff ID (Optional)'}
-                  </label>
-                  <input
-                    type="text"
-                    value={studentId}
-                    onChange={(e) => setStudentId(e.target.value)}
-                    placeholder="e.g. UE2000123"
-                    className="w-full px-3 py-2 bg-[#F5F7F4] border border-black/10 rounded-xl text-xs"
-                  />
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1">
-                  Department / School (Optional)
-                </label>
-                <input
-                  type="text"
-                  value={department}
-                  onChange={(e) => setDepartment(e.target.value)}
-                  placeholder="e.g. Computer Science, Renewable Energy"
-                  className="w-full px-3 py-2 bg-[#F5F7F4] border border-black/10 rounded-xl text-xs"
-                />
-              </div>
-            </>
-          )}
-
-          {/* Email input */}
-          <div>
-            <label className="block text-xs font-semibold text-slate-700 mb-1">
-              {mode === 'register' ? 'Email Address (Institutional or Personal) *' : 'Email Address *'}
-            </label>
-            <div className="relative">
-              <Mail className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
-              <input
-                type="email"
-                required
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                placeholder="your.name@uenr.edu.gh or gmail.com"
-                className="w-full pl-9 pr-3 py-2 bg-[#F5F7F4] border border-black/10 rounded-xl focus:outline-none focus:ring-2 focus:ring-[#176B45]"
-              />
-            </div>
-          </div>
-
-          {/* Password input */}
-          {mode !== 'forgot' && (
-            <div>
-              <div className="flex items-center justify-between mb-1">
-                <label className="text-xs font-semibold text-slate-700">Password *</label>
-                {mode === 'signin' && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setMode('forgot');
-                      setErrorMsg('');
-                    }}
-                    className="text-[11px] text-[#176B45] hover:underline font-medium"
-                  >
-                    Forgot password?
-                  </button>
-                )}
-              </div>
-              <div className="relative">
-                <Lock className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
-                <input
-                  type="password"
-                  required
-                  minLength={6}
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  placeholder="At least 6 characters"
-                  className="w-full pl-9 pr-3 py-2 bg-[#F5F7F4] border border-black/10 rounded-xl focus:outline-none focus:ring-2 focus:ring-[#176B45]"
-                />
-              </div>
-            </div>
-          )}
-
-          {/* Action Button */}
-          <div className="pt-2">
-            <button
-              type="submit"
-              disabled={loading}
-              className="w-full py-2.5 rounded-xl bg-[#176B45] text-white hover:bg-[#125537] font-semibold text-xs sm:text-sm transition-all shadow-sm flex items-center justify-center gap-2 disabled:opacity-50"
-            >
-              {loading ? (
-                <>
-                  <Loader2 className="w-4 h-4 animate-spin" />
-                  <span>Processing...</span>
-                </>
-              ) : mode === 'signin' ? (
-                <>
-                  <span>Sign In</span>
-                  <ArrowRight className="w-4 h-4" />
-                </>
-              ) : mode === 'register' ? (
-                <>
-                  <span>Create Account</span>
-                  <ArrowRight className="w-4 h-4" />
-                </>
-              ) : (
-                <span>Send Password Reset Email</span>
-              )}
-            </button>
-          </div>
-
-          {mode === 'forgot' && (
-            <div className="text-center pt-1">
-              <button
-                type="button"
-                onClick={() => setMode('signin')}
-                className="text-xs text-[#176B45] hover:underline font-semibold"
-              >
-                Back to Sign In
-              </button>
-            </div>
-          )}
-        </form>
       </div>
     </div>
   );

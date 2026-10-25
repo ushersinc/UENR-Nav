@@ -18,7 +18,7 @@ import { INITIAL_CAMPUS_LOCATIONS } from '../data/campusLocations';
 const KEYS = {
   FAVORITES: 'uenr_nav_favorites',
   RECENTS: 'uenr_nav_recent_searches',
-  CUSTOM_LOCATIONS: 'uenr_nav_custom_locations',
+  CUSTOM_LOCATIONS: 'uenr_nav_custom_locations_v2',
   REPORTS: 'uenr_nav_reports',
   NOTICES: 'uenr_nav_notices',
 };
@@ -157,7 +157,16 @@ export function getStoredLocations(): CampusLocation[] {
     const raw = localStorage.getItem(KEYS.CUSTOM_LOCATIONS);
     if (!raw) return INITIAL_CAMPUS_LOCATIONS;
     const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) && parsed.length > 0 ? parsed : INITIAL_CAMPUS_LOCATIONS;
+    if (!Array.isArray(parsed) || parsed.length === 0) return INITIAL_CAMPUS_LOCATIONS;
+
+    // Purge any stale cache with outdated/inaccurate coordinates (e.g. main-campus-gate at -2.3496)
+    const mainGate = parsed.find((l: CampusLocation) => l.id === 'main-campus-gate');
+    if (mainGate && mainGate.lng < -2.346) {
+      localStorage.setItem(KEYS.CUSTOM_LOCATIONS, JSON.stringify(INITIAL_CAMPUS_LOCATIONS));
+      return INITIAL_CAMPUS_LOCATIONS;
+    }
+
+    return parsed;
   } catch {
     return INITIAL_CAMPUS_LOCATIONS;
   }
@@ -181,16 +190,19 @@ export async function saveLocationToServer(
     shortCode: location.shortCode || 'CAMP',
     aliases: location.aliases || [],
     category: location.category || 'lecture_hall',
-    lat: location.lat || 7.3495,
-    lng: location.lng || -2.3435,
+    lat: location.lat || 7.3502,
+    lng: location.lng || -2.3425,
     description: location.description || '',
     openingHours: location.openingHours || '',
     accessibility: location.accessibility || 'Standard access',
-    verificationStatus: location.verificationStatus || 'pending_verification',
+    verificationStatus: location.verificationStatus || 'needs_review',
     lastVerified: new Date().toISOString().split('T')[0],
     facilities: location.facilities || ['Standard Facilities'],
     floorCount: location.floorCount,
     contactPhone: location.contactPhone,
+    source: location.source || 'Admin Entry',
+    osmId: location.osmId,
+    verifiedBy: location.verifiedBy,
   };
 
   // Persist to Cloud Firestore
@@ -306,6 +318,11 @@ export async function updateReportStatus(
    CAMPUS NOTICES (Cloud Firestore collection 'notices')
    ========================================================================== */
 
+export const KEYS_STORAGE = {
+  ...KEYS,
+  READ_NOTICES: 'uenr_nav_read_notices',
+};
+
 export async function fetchNotices(): Promise<CampusNotice[]> {
   try {
     const colRef = collection(db, 'notices');
@@ -331,45 +348,163 @@ export async function fetchNotices(): Promise<CampusNotice[]> {
   }
 }
 
+/**
+ * Filters announcements for student/public view vs administrator view:
+ * Ordinary users only see published, active, non-expired notices whose scheduled date has arrived.
+ */
+export function filterVisibleNotices(notices: CampusNotice[], isAdminUser = false): CampusNotice[] {
+  if (isAdminUser) return notices;
+
+  const now = new Date();
+  return notices.filter((n) => {
+    // Must be active and published
+    if (!n.active) return false;
+    if (n.status && n.status !== 'published') return false;
+
+    // Check future schedule
+    if (n.scheduledAt) {
+      const sched = new Date(n.scheduledAt);
+      if (sched > now) return false;
+    }
+
+    // Check expiration
+    if (n.expiresAt) {
+      const exp = new Date(n.expiresAt);
+      if (exp <= now) return false;
+    }
+
+    return true;
+  });
+}
+
 export async function createNoticeOnServer(
-  notice: Omit<CampusNotice, 'id' | 'postedDate' | 'active'>
+  notice: Partial<CampusNotice>
 ): Promise<CampusNotice> {
-  const id = `notice-${Date.now()}`;
-  const newNotice: CampusNotice = {
-    ...notice,
-    id,
-    postedDate: 'Just now',
-    active: true,
-  };
-
+  const id = notice.id || `notice-${Date.now()}`;
+  const now = new Date().toISOString();
   const user = auth.currentUser;
-  const docPayload = {
-    ...newNotice,
+
+  const newNotice: CampusNotice = {
+    id,
+    title: notice.title || 'Campus Announcement',
+    message: notice.message || '',
+    category: notice.category || 'General',
+    priority: notice.priority || 'Normal',
+    status: notice.status || 'published',
+    type: notice.type || 'info',
+    affectedLocationId: notice.affectedLocationId,
+    locationName: notice.locationName,
+    postedDate: 'Just now',
+    publishedAt: notice.status === 'published' ? (notice.publishedAt || now) : undefined,
+    scheduledAt: notice.scheduledAt,
+    expiresAt: notice.expiresAt,
+    startTime: notice.startTime,
+    endTime: notice.endTime,
     authorUid: user ? user.uid : 'admin',
-    createdAt: new Date().toISOString(),
+    active: notice.active !== undefined ? notice.active : true,
+    createdAt: now,
+    updatedAt: now,
   };
 
-  const docRef = doc(db, 'notices', id);
-  await setDoc(docRef, docPayload);
+  try {
+    const docRef = doc(db, 'notices', id);
+    await setDoc(docRef, newNotice);
+  } catch (err) {
+    console.warn('Firestore notice write (offline fallback):', err);
+  }
 
   const current = await fetchNotices();
-  localStorage.setItem(KEYS.NOTICES, JSON.stringify([newNotice, ...current]));
+  const updated = [newNotice, ...current.filter((n) => n.id !== id)];
+  localStorage.setItem(KEYS.NOTICES, JSON.stringify(updated));
   return newNotice;
 }
 
-export async function toggleNoticeOnServer(id: string, active: boolean): Promise<CampusNotice> {
-  const docRef = doc(db, 'notices', id);
-  await updateDoc(docRef, { active });
+export async function updateNoticeOnServer(
+  id: string,
+  updates: Partial<CampusNotice>
+): Promise<CampusNotice> {
+  const now = new Date().toISOString();
+  const user = auth.currentUser;
 
-  const current = (await fetchNotices()).map((n) => (n.id === id ? { ...n, active } : n));
-  localStorage.setItem(KEYS.NOTICES, JSON.stringify(current));
-  return current.find((n) => n.id === id)!;
+  const payload: Partial<CampusNotice> = {
+    ...updates,
+    updatedAt: now,
+    authorUid: user ? user.uid : updates.authorUid,
+  };
+
+  if (updates.status === 'published' && !updates.publishedAt) {
+    payload.publishedAt = now;
+  }
+
+  try {
+    const docRef = doc(db, 'notices', id);
+    await updateDoc(docRef, payload);
+  } catch (err) {
+    console.warn('Firestore notice update (offline fallback):', err);
+  }
+
+  const current = await fetchNotices();
+  const updated = current.map((n) => (n.id === id ? { ...n, ...payload } : n));
+  localStorage.setItem(KEYS.NOTICES, JSON.stringify(updated));
+  return updated.find((n) => n.id === id)!;
+}
+
+export async function toggleNoticeOnServer(id: string, active: boolean): Promise<CampusNotice> {
+  return updateNoticeOnServer(id, { active });
 }
 
 export async function deleteNoticeOnServer(id: string): Promise<void> {
-  const docRef = doc(db, 'notices', id);
-  await deleteDoc(docRef);
+  try {
+    const docRef = doc(db, 'notices', id);
+    await deleteDoc(docRef);
+  } catch (err) {
+    console.warn('Firestore notice delete (offline fallback):', err);
+  }
 
   const current = (await fetchNotices()).filter((n) => n.id !== id);
   localStorage.setItem(KEYS.NOTICES, JSON.stringify(current));
 }
+
+/* ==========================================================================
+   PER-USER UNREAD ANNOUNCEMENT TRACKING
+   ========================================================================== */
+
+function getReadStorageKey(userId?: string): string {
+  const uid = userId || auth.currentUser?.uid || 'guest';
+  return `uenr_nav_read_notices_${uid}`;
+}
+
+export function getReadNoticeIds(userId?: string): string[] {
+  try {
+    const key = getReadStorageKey(userId);
+    const raw = localStorage.getItem(key);
+    return raw ? JSON.parse(raw) : [];
+  } catch {
+    return [];
+  }
+}
+
+export function markNoticeAsRead(noticeId: string, userId?: string): string[] {
+  const current = getReadNoticeIds(userId);
+  if (current.includes(noticeId)) return current;
+  const updated = [...current, noticeId];
+  try {
+    localStorage.setItem(getReadStorageKey(userId), JSON.stringify(updated));
+  } catch (e) {
+    console.error('Failed to store read status', e);
+  }
+  return updated;
+}
+
+export function markAllNoticesAsRead(noticeIds: string[], userId?: string): string[] {
+  const current = new Set(getReadNoticeIds(userId));
+  noticeIds.forEach((id) => current.add(id));
+  const updated = Array.from(current);
+  try {
+    localStorage.setItem(getReadStorageKey(userId), JSON.stringify(updated));
+  } catch (e) {
+    console.error('Failed to store mark all read', e);
+  }
+  return updated;
+}
+
