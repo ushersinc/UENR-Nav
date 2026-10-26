@@ -5,86 +5,143 @@ import {
   RouteAccessibilityInfo,
   AccessibilitySurface,
   AccessibilitySlope,
+  PedestrianNode,
+  PedestrianEdge,
+  RoutingGraph,
 } from '../types/campus';
+import {
+  VERIFIED_CAMPUS_NODES,
+  VERIFIED_CAMPUS_EDGES,
+  calculateGeodesicDistanceMeters,
+  computeGeometryLength,
+  INITIAL_ROUTING_GRAPH,
+} from '../data/pedestrianGraphData';
 
 /* ==========================================================================
-   UENR CAMPUS PEDESTRIAN WALKWAY GRAPH & DIJKSTRA ROUTING ENGINE
-   Geographically verified against OpenStreetMap Ways, Nodes & Footpaths
+   MIN-PRIORITY QUEUE IMPLEMENTATION (Binary Min-Heap)
+   Provides efficient O((V + E) log V) time complexity for shortest-path search
    ========================================================================== */
 
-export interface NetworkNode {
-  id: string;
-  name: string;
-  coordinates: [number, number]; // [lat, lng]
+interface PriorityQueueElement<T> {
+  item: T;
+  priority: number;
 }
 
-export interface NetworkEdge {
-  from: string;
-  to: string;
-  distance: number; // in meters
-  pathwayName: string;
-  isStepFree: boolean;
-  hasStairs: boolean;
-  surface: AccessibilitySurface;
-  slope: AccessibilitySlope;
-  isTemporarilyClosed?: boolean;
-  closureReason?: string;
-  accessibilityVerification: 'verified' | 'unknown';
-  notes?: string;
+export class MinPriorityQueue<T> {
+  private heap: PriorityQueueElement<T>[] = [];
+
+  push(item: T, priority: number): void {
+    this.heap.push({ item, priority });
+    this.bubbleUp(this.heap.length - 1);
+  }
+
+  pop(): T | undefined {
+    if (this.heap.length === 0) return undefined;
+    const min = this.heap[0].item;
+    const last = this.heap.pop()!;
+    if (this.heap.length > 0) {
+      this.heap[0] = last;
+      this.bubbleDown(0);
+    }
+    return min;
+  }
+
+  isEmpty(): boolean {
+    return this.heap.length === 0;
+  }
+
+  get size(): number {
+    return this.heap.length;
+  }
+
+  private bubbleUp(index: number): void {
+    let current = index;
+    while (current > 0) {
+      const parent = Math.floor((current - 1) / 2);
+      if (this.heap[current].priority >= this.heap[parent].priority) break;
+      const temp = this.heap[current];
+      this.heap[current] = this.heap[parent];
+      this.heap[parent] = temp;
+      current = parent;
+    }
+  }
+
+  private bubbleDown(index: number): void {
+    let current = index;
+    const length = this.heap.length;
+
+    while (true) {
+      const left = 2 * current + 1;
+      const right = 2 * current + 2;
+      let smallest = current;
+
+      if (left < length && this.heap[left].priority < this.heap[smallest].priority) {
+        smallest = left;
+      }
+      if (right < length && this.heap[right].priority < this.heap[smallest].priority) {
+        smallest = right;
+      }
+      if (smallest === current) break;
+
+      const temp = this.heap[current];
+      this.heap[current] = this.heap[smallest];
+      this.heap[smallest] = temp;
+      current = smallest;
+    }
+  }
 }
+
+/* ==========================================================================
+   ROUTING CONFIGURATION & GEOMETRIC UTILITIES
+   ========================================================================== */
+
+// Default maximum allowed distance from origin or destination to campus network node
+export const DEFAULT_SNAPPING_THRESHOLD_METERS = 150;
+
+// Campus bounding box coordinates
+export const CAMPUS_LAT_MIN = 7.33;
+export const CAMPUS_LAT_MAX = 7.37;
+export const CAMPUS_LNG_MIN = -2.36;
+export const CAMPUS_LNG_MAX = -2.32;
+
+// Default walking speed: ~1.3 m/s (~4.7 km/h) for standard walk, ~1.0 m/s for wheelchair/stair-free
+export const STANDARD_WALKING_SPEED_MPS = 1.3;
+export const ACCESSIBLE_WALKING_SPEED_MPS = 1.0;
+
+// Re-export geodesic distance calculation for backwards compatibility
+export const calculateDistanceMeters = calculateGeodesicDistanceMeters;
 
 /**
- * Verified Campus Walkway Intersections & Entrance Nodes
- * Grounded in OpenStreetMap Way and Node coordinates for UENR Sunyani
+ * Validates if coordinates lie within UENR campus geographic boundary
  */
-export const CAMPUS_NODES: Record<string, NetworkNode> = {
-  main_gate: { id: 'main_gate', name: 'Main Campus Gate Checkpoint', coordinates: [7.34919, -2.34382] },
-  eye_of_god: { id: 'eye_of_god', name: 'Eye of God Circular Landmark', coordinates: [7.34872, -2.34340] },
-  entrance_concourse: { id: 'entrance_concourse', name: 'Campus Concourse & Mid-Exit Walkway', coordinates: [7.34891, -2.34274] },
-  admin_junction: { id: 'admin_junction', name: 'Main Administration Boulevard', coordinates: [7.34850, -2.34232] },
-  central_admin: { id: 'central_admin', name: 'Central Administration Complex', coordinates: [7.34793, -2.34224] },
-  new_library: { id: 'new_library', name: 'New Library Walkway', coordinates: [7.34811, -2.34264] },
-  lts_leo_block: { id: 'lts_leo_block', name: 'LEO & South Lecture Quadrangle', coordinates: [7.34867, -2.34271] },
-  clinic_junction: { id: 'clinic_junction', name: 'School Health Clinic Lane', coordinates: [7.34907, -2.34312] },
-  science_labs: { id: 'science_labs', name: 'Science Laboratories Path', coordinates: [7.34927, -2.34314] },
-  odum_forestry: { id: 'odum_forestry', name: 'Odum Natural Resources Walkway', coordinates: [7.34937, -2.34305] },
-  old_library: { id: 'old_library', name: 'Old Library & Reading Corridor', coordinates: [7.34955, -2.34299] },
-  old_auditorium: { id: 'old_auditorium', name: 'Old Auditorium Forecourt', coordinates: [7.34949, -2.34272] },
-  cafeteria_plaza: { id: 'cafeteria_plaza', name: 'Central Cafeteria Plaza', coordinates: [7.34951, -2.34248] },
-  dict_centre: { id: 'dict_centre', name: 'DICT / IT Directorate Concourse', coordinates: [7.34904, -2.34262] },
-  commercial_mart: { id: 'commercial_mart', name: 'Student Mart & Commercial Square', coordinates: [7.34940, -2.34230] },
-  central_crossroads: { id: 'central_crossroads', name: 'Central Academic Crossroads', coordinates: [7.34994, -2.34223] },
-  basic_school: { id: 'basic_school', name: 'UENR Basic School Walkway', coordinates: [7.35020, -2.34375] },
-  sports_park_south: { id: 'sports_park_south', name: 'Sports Park South Gate', coordinates: [7.35046, -2.34263] },
-  sports_park_pitch: { id: 'sports_park_pitch', name: 'UENR Sports Stadium & Pitch', coordinates: [7.35078, -2.34291] },
-  bball_court: { id: 'bball_court', name: 'Basketball & Sports Hardcourt', coordinates: [7.35095, -2.34245] },
-  pavilion_hub: { id: 'pavilion_hub', name: 'Campus Pavilion & Commons', coordinates: [7.35121, -2.34200] },
-  lt_block: { id: 'lt_block', name: 'LT Block Central Promenade', coordinates: [7.35124, -2.34158] },
-  school_of_sciences: { id: 'school_of_sciences', name: 'School of Sciences Corridor', coordinates: [7.35114, -2.34184] },
-  rcees_building: { id: 'rcees_building', name: 'RCEES Academic Walkway', coordinates: [7.35162, -2.34072] },
-  works_engineering: { id: 'works_engineering', name: 'Engineering Workshops & Works Lane', coordinates: [7.35052, -2.34131] },
-  eoric_app_lab: { id: 'eoric_app_lab', name: 'EORIC & APP Lab Research Lane', coordinates: [7.34950, -2.34099] },
-  sh_block: { id: 'sh_block', name: 'SH Block Quadrangle', coordinates: [7.35010, -2.33994] },
-  getfund_road_start: { id: 'getfund_road_start', name: 'GetFund Road North Junction', coordinates: [7.35185, -2.34335] },
-  summer_hut: { id: 'summer_hut', name: 'GETFund Summer Hut Gardens', coordinates: [7.35228, -2.34301] },
-  greena_fm: { id: 'greena_fm', name: 'Greena FM Studio Lane', coordinates: [7.35248, -2.34394] },
-  hall1_pathway: { id: 'hall1_pathway', name: 'Hall One Paved Pathway', coordinates: [7.35197, -2.34408] },
-  hall1_hostel: { id: 'hall1_hostel', name: 'University Hall 1 Forecourt', coordinates: [7.35280, -2.34420] },
-  getfund_hostel: { id: 'getfund_hostel', name: 'GETFund Hostel Main Entrance', coordinates: [7.35272, -2.34384] },
-  hall2_hostel: { id: 'hall2_hostel', name: 'University Hall 2 North Complex', coordinates: [7.35439, -2.34460] },
-  bog_auditorium: { id: 'bog_auditorium', name: 'Bank of Ghana Auditorium Boulevard', coordinates: [7.35337, -2.34024] },
-};
+export function isCoordinateWithinCampus(lat: number, lng: number): boolean {
+  return (
+    typeof lat === 'number' &&
+    typeof lng === 'number' &&
+    !isNaN(lat) &&
+    !isNaN(lng) &&
+    lat >= CAMPUS_LAT_MIN &&
+    lat <= CAMPUS_LAT_MAX &&
+    lng >= CAMPUS_LNG_MIN &&
+    lng <= CAMPUS_LNG_MAX
+  );
+}
 
 /**
- * Formats distance in meters or kilometers
+ * Formats distance with sensible rounding:
+ * - Under 1,000 meters: displays meters (e.g. "350 m")
+ * - 1,000 meters or more: displays kilometers with one decimal (e.g. "1.2 km")
  */
 export function formatDistance(meters: number): string {
-  if (meters < 1000) return `${Math.round(meters)} m`;
-  return `${(meters / 1000).toFixed(1)} km`;
+  if (meters < 1000) {
+    return `${Math.round(meters)} m`;
+  }
+  const km = meters / 1000;
+  return `${km.toFixed(1)} km`;
 }
 
 /**
- * Formats duration in minutes or hours
+ * Formats estimated walking duration in minutes or hours
  */
 export function formatWalkingDuration(seconds: number): string {
   const mins = Math.ceil(seconds / 60);
@@ -93,536 +150,699 @@ export function formatWalkingDuration(seconds: number): string {
   if (mins >= 60) {
     const hours = Math.floor(mins / 60);
     const remMins = mins % 60;
-    return `${hours}h ${remMins}m`;
+    return remMins > 0 ? `${hours}h ${remMins}m` : `${hours}h`;
   }
   return `${mins} mins`;
 }
 
 /**
- * Calculates geodesic distance between two points in meters using Haversine formula
+ * Calculates initial bearing from point 1 to point 2 in degrees (0 - 360)
  */
-export function calculateDistanceMeters(
-  lat1: number,
-  lon1: number,
-  lat2: number,
-  lon2: number
-): number {
-  const R = 6371e3;
+export function calculateBearing(lat1: number, lon1: number, lat2: number, lon2: number): number {
   const phi1 = (lat1 * Math.PI) / 180;
   const phi2 = (lat2 * Math.PI) / 180;
-  const deltaPhi = ((lat2 - lat1) * Math.PI) / 180;
   const deltaLambda = ((lon2 - lon1) * Math.PI) / 180;
 
-  const a =
-    Math.sin(deltaPhi / 2) * Math.sin(deltaPhi / 2) +
-    Math.cos(phi1) * Math.cos(phi2) * Math.sin(deltaLambda / 2) * Math.sin(deltaLambda / 2);
-  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-
-  return Math.round(R * c);
-}
-
-// Helper to construct bidirectional edge with precise Haversine distance and accessibility attributes
-interface EdgeAccessibilityOptions {
-  isStepFree?: boolean;
-  hasStairs?: boolean;
-  surface?: AccessibilitySurface;
-  slope?: AccessibilitySlope;
-  isTemporarilyClosed?: boolean;
-  closureReason?: string;
-  notes?: string;
-}
-
-function createEdge(
-  from: string,
-  to: string,
-  pathwayName: string,
-  acc: EdgeAccessibilityOptions = {}
-): NetworkEdge {
-  const nodeA = CAMPUS_NODES[from];
-  const nodeB = CAMPUS_NODES[to];
-  const dist = nodeA && nodeB
-    ? calculateDistanceMeters(nodeA.coordinates[0], nodeA.coordinates[1], nodeB.coordinates[0], nodeB.coordinates[1])
-    : 100;
-
-  return {
-    from,
-    to,
-    distance: Math.max(15, dist),
-    pathwayName,
-    isStepFree: acc.isStepFree ?? true,
-    hasStairs: acc.hasStairs ?? false,
-    surface: acc.surface ?? 'asphalt',
-    slope: acc.slope ?? 'flat',
-    isTemporarilyClosed: acc.isTemporarilyClosed ?? false,
-    closureReason: acc.closureReason,
-    accessibilityVerification: 'verified',
-    notes: acc.notes,
-  };
-}
-
-/**
- * Verified Bidirectional Walkway Edges along Real Campus Paths & Roads
- * Real UENR campus verification attributes:
- * - Major asphalt/concrete avenues have ramped curb access and are step-free
- * - Tiered stairs are modeled at LT Block upper tier and South Lecture connectors
- * - Dirt access paths are categorized with moderate slope
- */
-export const CAMPUS_EDGES: NetworkEdge[] = [
-  // Entrance Sector (All asphalt paved with accessible curbs)
-  createEdge('main_gate', 'eye_of_god', 'Campus Entrance Boulevard', {
-    surface: 'asphalt',
-    slope: 'flat',
-    notes: 'Wide paved dual carriageway with smooth accessible sidewalks',
-  }),
-  createEdge('eye_of_god', 'entrance_concourse', 'Main Campus Access Drive', {
-    surface: 'asphalt',
-    slope: 'flat',
-  }),
-  createEdge('entrance_concourse', 'clinic_junction', 'Campus Health Footpath', {
-    surface: 'concrete',
-    slope: 'flat',
-    notes: 'Direct step-free ambulance and wheelchair pathway to UENR Health Clinic',
-  }),
-  createEdge('entrance_concourse', 'admin_junction', 'Administration West Avenue', {
-    surface: 'asphalt',
-    slope: 'flat',
-  }),
-  createEdge('entrance_concourse', 'dict_centre', 'ICT Directorate Walkway', {
-    surface: 'paved',
-    slope: 'flat',
-  }),
-
-  // Health & Academic Cluster
-  createEdge('clinic_junction', 'science_labs', 'Science Laboratories Lane', {
-    surface: 'concrete',
-    slope: 'flat',
-  }),
-  createEdge('science_labs', 'odum_forestry', 'Odum Block Paved Walkway', {
-    surface: 'paved',
-    slope: 'flat',
-  }),
-  createEdge('odum_forestry', 'old_library', 'Library Academic Link', {
-    surface: 'concrete',
-    slope: 'flat',
-  }),
-  createEdge('old_library', 'old_auditorium', 'Historic Auditorium Walkway', {
-    surface: 'concrete',
-    slope: 'flat',
-  }),
-  createEdge('old_auditorium', 'cafeteria_plaza', 'Cafeteria Forecourt Path', {
-    surface: 'paved',
-    slope: 'flat',
-    notes: 'Broad open pedestrian plaza leading to Central Cafeteria',
-  }),
-  createEdge('cafeteria_plaza', 'commercial_mart', 'Student Commercial Concourse', {
-    surface: 'paved',
-    slope: 'flat',
-  }),
-  createEdge('dict_centre', 'commercial_mart', 'DICT South Corridor', {
-    surface: 'concrete',
-    slope: 'flat',
-  }),
-  createEdge('entrance_concourse', 'old_auditorium', 'Central Mid-Exit Walkway', {
-    surface: 'paved',
-    slope: 'flat',
-  }),
-
-  // Administration & South Sector
-  createEdge('admin_junction', 'central_admin', 'Vice Chancellor Drive', {
-    surface: 'asphalt',
-    slope: 'flat',
-    notes: 'Paved administration roadway with accessible entrance ramp',
-  }),
-  createEdge('admin_junction', 'new_library', 'New Library Promenade', {
-    surface: 'paved',
-    slope: 'flat',
-  }),
-  createEdge('admin_junction', 'lts_leo_block', 'LEO Block Quadrangle Path', {
-    surface: 'paved',
-    slope: 'moderate',
-    notes: 'Paved gradient path leading to south quadrangle',
-  }),
-  // STAIRS CONNECTION: The direct shortcut between South Lecture connector has tiered concrete stairs
-  createEdge('new_library', 'lts_leo_block', 'South Lecture Stair Connector', {
-    isStepFree: false,
-    hasStairs: true,
-    surface: 'concrete',
-    slope: 'steep',
-    notes: 'Tiered concrete stairway; not wheelchair accessible. Use Administration West Avenue for step-free route.',
-  }),
-
-  // Central Academic & Sports Sector
-  createEdge('cafeteria_plaza', 'central_crossroads', 'Central Academic Concourse', {
-    surface: 'paved',
-    slope: 'flat',
-  }),
-  createEdge('commercial_mart', 'central_crossroads', 'Central Concourse Link', {
-    surface: 'paved',
-    slope: 'flat',
-  }),
-  createEdge('central_crossroads', 'sports_park_south', 'Sports Park Access Path', {
-    surface: 'asphalt',
-    slope: 'flat',
-  }),
-  createEdge('sports_park_south', 'sports_park_pitch', 'Sports Stadium Walkway', {
-    surface: 'paved',
-    slope: 'flat',
-  }),
-  createEdge('sports_park_pitch', 'bball_court', 'Sports Court Sidewalk', {
-    surface: 'concrete',
-    slope: 'flat',
-  }),
-  // Unpaved crossway near school field
-  createEdge('odum_forestry', 'basic_school', 'Basic School Crossway', {
-    surface: 'dirt',
-    slope: 'moderate',
-    isStepFree: true,
-    hasStairs: false,
-    notes: 'Compacted earth pathway; uneven in rainy conditions',
-  }),
-  createEdge('basic_school', 'sports_park_south', 'School Park West Link', {
-    surface: 'dirt',
-    slope: 'moderate',
-    isStepFree: true,
-    hasStairs: false,
-  }),
-
-  // Lecture Theatres, Pavilion, RCEES Sector
-  createEdge('central_crossroads', 'pavilion_hub', 'Pavilion Promenade', {
-    surface: 'paved',
-    slope: 'flat',
-    notes: 'Central step-free arterial promenade',
-  }),
-  createEdge('sports_park_south', 'pavilion_hub', 'Pavilion West Path', {
-    surface: 'paved',
-    slope: 'flat',
-  }),
-  createEdge('pavilion_hub', 'school_of_sciences', 'School of Sciences Walkway', {
-    surface: 'concrete',
-    slope: 'flat',
-  }),
-  createEdge('school_of_sciences', 'lt_block', 'LT Lecture Concourse', {
-    surface: 'concrete',
-    slope: 'flat',
-    notes: 'Ramped access to LT Block main ground floor entrances',
-  }),
-  createEdge('pavilion_hub', 'lt_block', 'LT Block West Arcade', {
-    surface: 'paved',
-    slope: 'flat',
-  }),
-  // STAIRS CONNECTION: The direct exterior embankment steps connecting LT Block and RCEES
-  createEdge('lt_block', 'rcees_building', 'LT - RCEES Tiered Flight', {
-    isStepFree: false,
-    hasStairs: true,
-    surface: 'concrete',
-    slope: 'steep',
-    notes: 'Flight of exterior steps. Wheelchair users should detour via Works Engineering / Pavilion Hub.',
-  }),
-  createEdge('bball_court', 'pavilion_hub', 'Sports Pavilion Connection', {
-    surface: 'concrete',
-    slope: 'flat',
-  }),
-
-  // East Sector (EORIC / APP Lab & SH Block & Engineering)
-  createEdge('commercial_mart', 'eoric_app_lab', 'East Research Corridor', {
-    surface: 'asphalt',
-    slope: 'flat',
-  }),
-  createEdge('central_crossroads', 'works_engineering', 'Works Department Avenue', {
-    surface: 'asphalt',
-    slope: 'flat',
-  }),
-  createEdge('works_engineering', 'rcees_building', 'Engineering - RCEES Paved Boulevard', {
-    surface: 'asphalt',
-    slope: 'moderate',
-    notes: 'Fully paved step-free access to RCEES and Engineering labs',
-  }),
-  createEdge('works_engineering', 'eoric_app_lab', 'Engineering Research Path', {
-    surface: 'paved',
-    slope: 'flat',
-  }),
-  createEdge('eoric_app_lab', 'sh_block', 'SH Building East Walkway', {
-    surface: 'paved',
-    slope: 'flat',
-  }),
-  // Unpaved Sawmill pathway
-  createEdge('works_engineering', 'sh_block', 'Sawmill Academic Path', {
-    surface: 'dirt',
-    slope: 'moderate',
-    isStepFree: true,
-    hasStairs: false,
-    notes: 'Unpaved dirt pathway between sawmill and SH Block',
-  }),
-
-  // Northern Hostels & Bank of Ghana Sector (All wide paved roadways)
-  createEdge('pavilion_hub', 'getfund_road_start', 'GetFund North Link', {
-    surface: 'asphalt',
-    slope: 'moderate',
-  }),
-  createEdge('bball_court', 'getfund_road_start', 'Sports North Connector', {
-    surface: 'asphalt',
-    slope: 'moderate',
-  }),
-  createEdge('getfund_road_start', 'summer_hut', 'Summer Hut Garden Walkway', {
-    surface: 'paved',
-    slope: 'flat',
-  }),
-  createEdge('summer_hut', 'bog_auditorium', 'SSNIT-Fiapre Pedestrian Avenue', {
-    surface: 'asphalt',
-    slope: 'flat',
-    notes: 'Smooth asphalt avenue with curb ramps to Bank of Ghana Auditorium',
-  }),
-  createEdge('rcees_building', 'bog_auditorium', 'RCEES North Boulevard', {
-    surface: 'asphalt',
-    slope: 'moderate',
-    notes: 'Direct step-free boulevard connecting RCEES to BoG Auditorium',
-  }),
-  createEdge('getfund_road_start', 'hall1_pathway', 'Hall One Access Pathway', {
-    surface: 'asphalt',
-    slope: 'flat',
-  }),
-  createEdge('hall1_pathway', 'greena_fm', 'Greena FM Lane', {
-    surface: 'concrete',
-    slope: 'flat',
-  }),
-  createEdge('greena_fm', 'hall1_hostel', 'Hall One Forecourt Walkway', {
-    surface: 'paved',
-    slope: 'flat',
-  }),
-  createEdge('hall1_pathway', 'getfund_hostel', 'GETFund Hostel Front Road', {
-    surface: 'asphalt',
-    slope: 'flat',
-  }),
-  createEdge('getfund_hostel', 'hall1_hostel', 'Hostel Courtyard Crosslink', {
-    surface: 'paved',
-    slope: 'flat',
-  }),
-  createEdge('getfund_hostel', 'hall2_hostel', 'University Hall 2 North Connector', {
-    surface: 'asphalt',
-    slope: 'flat',
-  }),
-  createEdge('hall1_hostel', 'hall2_hostel', 'Northern Hostels Residential Walkway', {
-    surface: 'paved',
-    slope: 'flat',
-  }),
-];
-
-/**
- * Calculates compass bearing from point 1 to point 2 in degrees (0 - 360)
- */
-function calculateBearing(lat1: number, lon1: number, lat2: number, lon2: number): number {
-  const y = Math.sin(((lon2 - lon1) * Math.PI) / 180) * Math.cos((lat2 * Math.PI) / 180);
+  const y = Math.sin(deltaLambda) * Math.cos(phi2);
   const x =
-    Math.cos((lat1 * Math.PI) / 180) * Math.sin((lat2 * Math.PI) / 180) -
-    Math.sin((lat1 * Math.PI) / 180) *
-      Math.cos((lat2 * Math.PI) / 180) *
-      Math.cos(((lon2 - lon1) * Math.PI) / 180);
-  const brng = (Math.atan2(y, x) * 180) / Math.PI;
-  return (brng + 360) % 360;
+    Math.cos(phi1) * Math.sin(phi2) -
+    Math.sin(phi1) * Math.cos(phi2) * Math.cos(deltaLambda);
+  const theta = Math.atan2(y, x);
+
+  return ((theta * 180) / Math.PI + 360) % 360;
 }
 
-function getTurnDirection(b1: number, b2: number): string {
+/**
+ * Computes cardinal or relative turn direction based on two bearings
+ */
+export function getTurnDirection(b1: number, b2: number): string {
   let diff = (b2 - b1 + 360) % 360;
   if (diff > 180) diff -= 360;
 
   if (Math.abs(diff) < 25) return 'continue straight';
-  if (diff >= 25 && diff < 65) return 'slight right';
-  if (diff >= 65 && diff < 120) return 'right';
-  if (diff >= 120) return 'sharp right';
-  if (diff <= -25 && diff > -65) return 'slight left';
-  if (diff <= -65 && diff > -120) return 'left';
+  if (diff > 25 && diff <= 65) return 'slight right';
+  if (diff > 65 && diff <= 120) return 'turn right';
+  if (diff > 120) return 'sharp right';
+  if (diff < -25 && diff >= -65) return 'slight left';
+  if (diff < -65 && diff >= -120) return 'turn left';
   return 'sharp left';
 }
 
-/**
- * Finds the closest campus graph node to a given coordinate
- */
-function findClosestNode(lat: number, lng: number): NetworkNode {
-  let closest = Object.values(CAMPUS_NODES)[0];
-  let minDist = Infinity;
+/* ==========================================================================
+   ACTIVE GRAPH STATE & MANAGEMENT
+   ========================================================================== */
 
-  for (const node of Object.values(CAMPUS_NODES)) {
-    const d = calculateDistanceMeters(lat, lng, node.coordinates[0], node.coordinates[1]);
-    if (d < minDist) {
-      minDist = d;
+let activeGraph: RoutingGraph = { ...INITIAL_ROUTING_GRAPH };
+
+export function getActiveCampusGraph(): RoutingGraph {
+  return activeGraph;
+}
+
+export function setActiveCampusGraph(graph: RoutingGraph): void {
+  activeGraph = graph;
+}
+
+// Export backwards-compatible aliases
+export const CAMPUS_NODES: Record<string, PedestrianNode> = activeGraph.nodes;
+export const CAMPUS_EDGES: PedestrianEdge[] = activeGraph.edges;
+
+/* ==========================================================================
+   GRAPH SNAPPING & ACCESS POINT RESOLUTION
+   ========================================================================== */
+
+export interface SnappedNodeResult {
+  node: PedestrianNode;
+  distanceMeters: number;
+  isWithinThreshold: boolean;
+}
+
+/**
+ * Finds the closest verified pedestrian node on campus to the given coordinates
+ */
+export function findClosestNode(
+  lat: number,
+  lng: number,
+  nodes: Record<string, PedestrianNode> = activeGraph.nodes,
+  thresholdMeters: number = DEFAULT_SNAPPING_THRESHOLD_METERS
+): SnappedNodeResult | null {
+  const nodeList = Object.values(nodes);
+  if (nodeList.length === 0) return null;
+
+  let closest: PedestrianNode = nodeList[0];
+  let minDistance = Infinity;
+
+  for (const node of nodeList) {
+    const dist = calculateGeodesicDistanceMeters(
+      lat,
+      lng,
+      node.coordinates[0],
+      node.coordinates[1]
+    );
+    if (dist < minDistance) {
+      minDistance = dist;
       closest = node;
     }
   }
 
-  return closest;
+  return {
+    node: closest,
+    distanceMeters: Math.round(minDistance),
+    isWithinThreshold: minDistance <= thresholdMeters,
+  };
 }
 
-interface DijkstraOptions {
+/* ==========================================================================
+   GRAPH ADJACENCY & EDGE FILTERING
+   ========================================================================== */
+
+export interface GraphAdjacencyItem {
+  toNodeId: string;
+  edge: PedestrianEdge;
+  traversalDistance: number; // in meters (actual walked distance)
+  effectiveWeight: number; // in meters, with accessibility weighting when requested
+  traversalGeometry: [number, number][]; // ordered vertices from source to target
+}
+
+export interface ShortestPathOptions {
   preference?: RoutingPreference;
+  algorithm?: 'astar' | 'dijkstra';
+  snappingThreshold?: number;
+  walkingSpeed?: number;
 }
 
-interface DijkstraResult {
+export interface ShortestPathResult {
   pathNodeIds: string[];
-  totalDistance: number;
-  edgesUsed: NetworkEdge[];
-  isAccessible: boolean;
+  edgesUsed: PedestrianEdge[];
+  totalDistanceMeters: number; // exact sum of geodesic walking distances
+  routeGeometry: [number, number][];
+  isStepFree: boolean;
   hasStairs: boolean;
+  stairsFlightCount: number;
+  maxSlope: AccessibilitySlope;
+  hasUnpavedSegments: boolean;
+  surfaceSummary: string;
   warnings: string[];
   routeFound: boolean;
+  errorMessage?: string;
+  algorithmUsed: 'astar' | 'dijkstra';
 }
 
 /**
- * Enhanced Dijkstra Shortest Path Solver with Step-Free & Wheelchair Accessibility Constraints
+ * Builds adjacency list for the pedestrian graph with bidirectional traversal
+ * and strict filtering for closures or accessibility violations.
  */
-function dijkstra(
-  startId: string,
-  endId: string,
-  options: DijkstraOptions = {}
-): DijkstraResult {
-  const { preference = 'all' } = options;
+export function buildAdjacencyList(
+  nodes: Record<string, PedestrianNode>,
+  edges: PedestrianEdge[],
+  preference: RoutingPreference = 'all'
+): Record<string, GraphAdjacencyItem[]> {
+  const adj: Record<string, GraphAdjacencyItem[]> = {};
+
+  for (const nodeId of Object.keys(nodes)) {
+    adj[nodeId] = [];
+  }
+
   const isAccessibleRequested =
     preference === 'step_free' || preference === 'wheelchair' || preference === 'avoid_stairs';
 
-  const distances: Record<string, number> = {};
-  const previous: Record<string, string | null> = {};
-  const edgeUsed: Record<string, NetworkEdge | null> = {};
-  const unvisited = new Set<string>();
-
-  // Build adjacency list
-  const adj: Record<string, { to: string; edge: NetworkEdge; weight: number }[]> = {};
-  for (const id of Object.keys(CAMPUS_NODES)) {
-    distances[id] = Infinity;
-    previous[id] = null;
-    edgeUsed[id] = null;
-    unvisited.add(id);
-    adj[id] = [];
-  }
-
-  // Populate edges with accessibility weighting
-  for (const edge of CAMPUS_EDGES) {
+  for (const edge of edges) {
+    // 1. Skip temporarily closed paths
     if (edge.isTemporarilyClosed) continue;
 
-    if (isAccessibleRequested) {
-      // Exclude stairs completely
-      if (edge.hasStairs) continue;
-      // Exclude non-step-free
-      if (preference !== 'avoid_stairs' && !edge.isStepFree) continue;
+    // 2. Strict accessibility filtering:
+    // If user requested step_free, wheelchair, or avoid_stairs, exclude stairs completely
+    if (isAccessibleRequested && edge.hasStairs) continue;
+
+    // If user strictly requested step_free or wheelchair, exclude non-step-free paths
+    if ((preference === 'step_free' || preference === 'wheelchair') && !edge.isStepFree) {
+      continue;
     }
 
-    let weight = edge.distance;
-    if (preference === 'wheelchair' || preference === 'step_free') {
-      if (edge.surface === 'dirt') weight *= 2.5;
-      if (edge.slope === 'steep') weight *= 3.0;
-      else if (edge.slope === 'moderate') weight *= 1.15;
+    // Base cost is the actual physical pedestrian distance along the pathway curve
+    const baseDistance = edge.distance > 0 ? edge.distance : computeGeometryLength(edge.geometry);
+    let effectiveWeight = baseDistance;
+
+    // Accessibility weighting: for wheelchair users, penalize steep slopes or unpaved terrain
+    if (preference === 'wheelchair') {
+      if (edge.surface === 'dirt' || edge.surface === 'gravel') {
+        effectiveWeight *= 2.5;
+      }
+      if (edge.slope === 'steep') {
+        effectiveWeight *= 3.0;
+      } else if (edge.slope === 'moderate') {
+        effectiveWeight *= 1.25;
+      }
     }
+
+    // Geometry forwards (from -> to)
+    const forwardGeom: [number, number][] =
+      edge.geometry && edge.geometry.length >= 2
+        ? edge.geometry
+        : [
+            nodes[edge.from]?.coordinates || [0, 0],
+            nodes[edge.to]?.coordinates || [0, 0],
+          ];
+
+    // Geometry reversed (to -> from)
+    const reverseGeom: [number, number][] = [...forwardGeom].reverse();
 
     if (adj[edge.from]) {
-      adj[edge.from].push({ to: edge.to, edge, weight });
+      adj[edge.from].push({
+        toNodeId: edge.to,
+        edge,
+        traversalDistance: baseDistance,
+        effectiveWeight,
+        traversalGeometry: forwardGeom,
+      });
     }
+
     if (adj[edge.to]) {
-      adj[edge.to].push({ to: edge.from, edge, weight });
+      adj[edge.to].push({
+        toNodeId: edge.from,
+        edge,
+        traversalDistance: baseDistance,
+        effectiveWeight,
+        traversalGeometry: reverseGeom,
+      });
     }
   }
 
-  distances[startId] = 0;
+  return adj;
+}
 
-  while (unvisited.size > 0) {
-    let currentId: string | null = null;
-    let minD = Infinity;
-    for (const id of unvisited) {
-      if (distances[id] < minD) {
-        minD = distances[id];
-        currentId = id;
-      }
-    }
+/* ==========================================================================
+   SHORTEST-PATH SEARCH: A* & DIJKSTRA
+   Strictly optimizes total walking distance in metres.
+   ========================================================================== */
 
-    if (!currentId || minD === Infinity) break;
-    if (currentId === endId) break;
+/**
+ * A* Shortest Path Search over verified pedestrian graph
+ * Uses admissible Haversine geodesic straight-line distance as heuristic h(n).
+ */
+export function astarShortestPath(
+  startNodeId: string,
+  endNodeId: string,
+  options: ShortestPathOptions = {},
+  nodes: Record<string, PedestrianNode> = activeGraph.nodes,
+  edges: PedestrianEdge[] = activeGraph.edges
+): ShortestPathResult {
+  const { preference = 'all' } = options;
 
-    unvisited.delete(currentId);
-
-    const neighbors = adj[currentId] || [];
-    for (const neighbor of neighbors) {
-      if (!unvisited.has(neighbor.to)) continue;
-      const alt = distances[currentId] + neighbor.weight;
-      if (alt < distances[neighbor.to]) {
-        distances[neighbor.to] = alt;
-        previous[neighbor.to] = currentId;
-        edgeUsed[neighbor.to] = neighbor.edge;
-      }
-    }
-  }
-
-  if (distances[endId] === Infinity) {
+  if (!nodes[startNodeId] || !nodes[endNodeId]) {
     return {
       pathNodeIds: [],
-      totalDistance: 0,
       edgesUsed: [],
-      isAccessible: false,
+      totalDistanceMeters: 0,
+      routeGeometry: [],
+      isStepFree: false,
       hasStairs: false,
-      warnings: ['No verified connected pathway found matching your accessibility criteria.'],
+      stairsFlightCount: 0,
+      maxSlope: 'unknown',
+      hasUnpavedSegments: false,
+      surfaceSummary: 'Unknown',
+      warnings: ['Specified origin or destination node does not exist in the campus graph.'],
       routeFound: false,
+      errorMessage: 'Invalid node identifier.',
+      algorithmUsed: 'astar',
     };
   }
 
-  const pathNodeIds: string[] = [];
-  const edges: NetworkEdge[] = [];
-  let curr: string | null = endId;
-  while (curr) {
-    pathNodeIds.unshift(curr);
-    const prevNode: string | null = previous[curr];
-    if (prevNode && edgeUsed[curr]) {
-      edges.unshift(edgeUsed[curr]!);
+  if (startNodeId === endNodeId) {
+    const singleCoord = nodes[startNodeId].coordinates;
+    return {
+      pathNodeIds: [startNodeId],
+      edgesUsed: [],
+      totalDistanceMeters: 0,
+      routeGeometry: [singleCoord],
+      isStepFree: true,
+      hasStairs: false,
+      stairsFlightCount: 0,
+      maxSlope: 'flat',
+      hasUnpavedSegments: false,
+      surfaceSummary: 'Current Location',
+      warnings: [],
+      routeFound: true,
+      algorithmUsed: 'astar',
+    };
+  }
+
+  const adj = buildAdjacencyList(nodes, edges, preference);
+  const targetCoords = nodes[endNodeId].coordinates;
+
+  // gScore[n]: shortest known physical distance from startNodeId to n
+  const gScore: Record<string, number> = {};
+  // fScore[n]: gScore[n] + h(n)
+  const fScore: Record<string, number> = {};
+  const cameFromNode: Record<string, string | null> = {};
+  const edgeUsedToReach: Record<string, PedestrianEdge | null> = {};
+  const edgeGeometryUsed: Record<string, [number, number][]> = {};
+
+  for (const id of Object.keys(nodes)) {
+    gScore[id] = Infinity;
+    fScore[id] = Infinity;
+    cameFromNode[id] = null;
+    edgeUsedToReach[id] = null;
+  }
+
+  gScore[startNodeId] = 0;
+  const initialH = calculateGeodesicDistanceMeters(
+    nodes[startNodeId].coordinates[0],
+    nodes[startNodeId].coordinates[1],
+    targetCoords[0],
+    targetCoords[1]
+  );
+  fScore[startNodeId] = initialH;
+
+  const openSet = new MinPriorityQueue<string>();
+  openSet.push(startNodeId, fScore[startNodeId]);
+  const closedSet = new Set<string>();
+
+  while (!openSet.isEmpty()) {
+    const currentId = openSet.pop()!;
+
+    if (currentId === endNodeId) {
+      break;
     }
-    curr = prevNode;
+
+    if (closedSet.has(currentId)) continue;
+    closedSet.add(currentId);
+
+    const neighbors = adj[currentId] || [];
+    for (const neighbor of neighbors) {
+      const neighborId = neighbor.toNodeId;
+      if (closedSet.has(neighborId)) continue;
+
+      const tentativeG = gScore[currentId] + neighbor.traversalDistance;
+
+      if (tentativeG < gScore[neighborId]) {
+        cameFromNode[neighborId] = currentId;
+        edgeUsedToReach[neighborId] = neighbor.edge;
+        edgeGeometryUsed[neighborId] = neighbor.traversalGeometry;
+        gScore[neighborId] = tentativeG;
+
+        const h = calculateGeodesicDistanceMeters(
+          nodes[neighborId].coordinates[0],
+          nodes[neighborId].coordinates[1],
+          targetCoords[0],
+          targetCoords[1]
+        );
+
+        // A* priority is total estimated distance f(n) = g(n) + h(n)
+        fScore[neighborId] = tentativeG + h;
+        openSet.push(neighborId, fScore[neighborId]);
+      }
+    }
   }
 
-  let realDist = 0;
-  for (const e of edges) {
-    realDist += e.distance;
+  // If destination was not reached
+  if (gScore[endNodeId] === Infinity) {
+    const isAccessibleSearch =
+      preference === 'step_free' || preference === 'wheelchair' || preference === 'avoid_stairs';
+    const errorMsg = isAccessibleSearch
+      ? 'No verified accessible pedestrian route is currently available between these campus locations.'
+      : 'No verified connected pedestrian pathway currently connects these campus locations.';
+
+    return {
+      pathNodeIds: [],
+      edgesUsed: [],
+      totalDistanceMeters: 0,
+      routeGeometry: [],
+      isStepFree: false,
+      hasStairs: false,
+      stairsFlightCount: 0,
+      maxSlope: 'unknown',
+      hasUnpavedSegments: false,
+      surfaceSummary: 'Inaccessible',
+      warnings: [errorMsg],
+      routeFound: false,
+      errorMessage: errorMsg,
+      algorithmUsed: 'astar',
+    };
   }
 
-  let pathHasStairs = false;
-  let allStepFree = true;
+  // Reconstruct path
+  return reconstructPath(
+    startNodeId,
+    endNodeId,
+    nodes,
+    cameFromNode,
+    edgeUsedToReach,
+    edgeGeometryUsed,
+    'astar'
+  );
+}
+
+/**
+ * Dijkstra Shortest Path Search over verified pedestrian graph
+ * Evaluates nodes strictly by distance from start node using MinPriorityQueue.
+ */
+export function dijkstraShortestPath(
+  startNodeId: string,
+  endNodeId: string,
+  options: ShortestPathOptions = {},
+  nodes: Record<string, PedestrianNode> = activeGraph.nodes,
+  edges: PedestrianEdge[] = activeGraph.edges
+): ShortestPathResult {
+  const { preference = 'all' } = options;
+
+  if (!nodes[startNodeId] || !nodes[endNodeId]) {
+    return {
+      pathNodeIds: [],
+      edgesUsed: [],
+      totalDistanceMeters: 0,
+      routeGeometry: [],
+      isStepFree: false,
+      hasStairs: false,
+      stairsFlightCount: 0,
+      maxSlope: 'unknown',
+      hasUnpavedSegments: false,
+      surfaceSummary: 'Unknown',
+      warnings: ['Specified origin or destination node does not exist in the campus graph.'],
+      routeFound: false,
+      errorMessage: 'Invalid node identifier.',
+      algorithmUsed: 'dijkstra',
+    };
+  }
+
+  if (startNodeId === endNodeId) {
+    const singleCoord = nodes[startNodeId].coordinates;
+    return {
+      pathNodeIds: [startNodeId],
+      edgesUsed: [],
+      totalDistanceMeters: 0,
+      routeGeometry: [singleCoord],
+      isStepFree: true,
+      hasStairs: false,
+      stairsFlightCount: 0,
+      maxSlope: 'flat',
+      hasUnpavedSegments: false,
+      surfaceSummary: 'Current Location',
+      warnings: [],
+      routeFound: true,
+      algorithmUsed: 'dijkstra',
+    };
+  }
+
+  const adj = buildAdjacencyList(nodes, edges, preference);
+
+  const distances: Record<string, number> = {};
+  const cameFromNode: Record<string, string | null> = {};
+  const edgeUsedToReach: Record<string, PedestrianEdge | null> = {};
+  const edgeGeometryUsed: Record<string, [number, number][]> = {};
+
+  for (const id of Object.keys(nodes)) {
+    distances[id] = Infinity;
+    cameFromNode[id] = null;
+    edgeUsedToReach[id] = null;
+  }
+
+  distances[startNodeId] = 0;
+  const pq = new MinPriorityQueue<string>();
+  pq.push(startNodeId, 0);
+
+  const settled = new Set<string>();
+
+  while (!pq.isEmpty()) {
+    const currentId = pq.pop()!;
+
+    if (currentId === endNodeId) break;
+    if (settled.has(currentId)) continue;
+    settled.add(currentId);
+
+    const neighbors = adj[currentId] || [];
+    for (const neighbor of neighbors) {
+      const neighborId = neighbor.toNodeId;
+      if (settled.has(neighborId)) continue;
+
+      const alt = distances[currentId] + neighbor.traversalDistance;
+      if (alt < distances[neighborId]) {
+        distances[neighborId] = alt;
+        cameFromNode[neighborId] = currentId;
+        edgeUsedToReach[neighborId] = neighbor.edge;
+        edgeGeometryUsed[neighborId] = neighbor.traversalGeometry;
+        pq.push(neighborId, alt);
+      }
+    }
+  }
+
+  if (distances[endNodeId] === Infinity) {
+    const isAccessibleSearch =
+      preference === 'step_free' || preference === 'wheelchair' || preference === 'avoid_stairs';
+    const errorMsg = isAccessibleSearch
+      ? 'No verified accessible pedestrian route is currently available between these campus locations.'
+      : 'No verified connected pedestrian pathway currently connects these campus locations.';
+
+    return {
+      pathNodeIds: [],
+      edgesUsed: [],
+      totalDistanceMeters: 0,
+      routeGeometry: [],
+      isStepFree: false,
+      hasStairs: false,
+      stairsFlightCount: 0,
+      maxSlope: 'unknown',
+      hasUnpavedSegments: false,
+      surfaceSummary: 'Inaccessible',
+      warnings: [errorMsg],
+      routeFound: false,
+      errorMessage: errorMsg,
+      algorithmUsed: 'dijkstra',
+    };
+  }
+
+  return reconstructPath(
+    startNodeId,
+    endNodeId,
+    nodes,
+    cameFromNode,
+    edgeUsedToReach,
+    edgeGeometryUsed,
+    'dijkstra'
+  );
+}
+
+/**
+ * Reconstructs ordered node sequence, edge list, geometry, distance, and accessibility metrics
+ */
+function reconstructPath(
+  startNodeId: string,
+  endNodeId: string,
+  nodes: Record<string, PedestrianNode>,
+  cameFromNode: Record<string, string | null>,
+  edgeUsedToReach: Record<string, PedestrianEdge | null>,
+  edgeGeometryUsed: Record<string, [number, number][]>,
+  algorithmUsed: 'astar' | 'dijkstra'
+): ShortestPathResult {
+  const pathNodeIds: string[] = [];
+  const edgesUsed: PedestrianEdge[] = [];
+  const fullGeometry: [number, number][] = [];
+
+  let curr: string | null = endNodeId;
+  const segments: [number, number][][] = [];
+
+  while (curr && curr !== startNodeId) {
+    pathNodeIds.unshift(curr);
+    const edge = edgeUsedToReach[curr];
+    const segmentGeom = edgeGeometryUsed[curr];
+    if (edge) {
+      edgesUsed.unshift(edge);
+    }
+    if (segmentGeom) {
+      segments.unshift(segmentGeom);
+    }
+    curr = cameFromNode[curr];
+  }
+
+  if (curr === startNodeId) {
+    pathNodeIds.unshift(startNodeId);
+  }
+
+  // Assemble continuous polyline geometry without duplicate consecutive coordinates
+  for (let s = 0; s < segments.length; s++) {
+    const seg = segments[s];
+    for (let p = 0; p < seg.length; p++) {
+      const pt = seg[p];
+      if (
+        fullGeometry.length === 0 ||
+        calculateGeodesicDistanceMeters(
+          pt[0],
+          pt[1],
+          fullGeometry[fullGeometry.length - 1][0],
+          fullGeometry[fullGeometry.length - 1][1]
+        ) > 1
+      ) {
+        fullGeometry.push(pt);
+      }
+    }
+  }
+
+  if (fullGeometry.length === 0 && nodes[startNodeId]) {
+    fullGeometry.push(nodes[startNodeId].coordinates);
+  }
+
+  // Calculate exact total distance from route segments
+  const sumEdges = edgesUsed.reduce((acc, e) => acc + (e.distance || 0), 0);
+  const totalDistanceMeters = sumEdges > 0 ? sumEdges : computeGeometryLength(fullGeometry);
+
+  // Evaluate accessibility metrics
+  let hasStairs = false;
+  let isStepFree = true;
+  let stairsFlightCount = 0;
+  let hasUnpavedSegments = false;
+  let maxSlope: AccessibilitySlope = 'flat';
   const warnings: string[] = [];
 
-  for (const e of edges) {
-    if (e.hasStairs) {
-      pathHasStairs = true;
-      allStepFree = false;
-      warnings.push(`Stairs present along ${e.pathwayName}`);
+  for (const edge of edgesUsed) {
+    if (edge.hasStairs) {
+      hasStairs = true;
+      isStepFree = false;
+      stairsFlightCount += 1;
+      warnings.push(`Stairs present along ${edge.pathwayName} (${edge.stairsCount || 10}+ steps).`);
     }
-    if (!e.isStepFree) {
-      allStepFree = false;
+    if (!edge.isStepFree) {
+      isStepFree = false;
     }
-    if (e.surface === 'dirt') {
-      warnings.push(`Unpaved dirt surface along ${e.pathwayName}`);
+    if (edge.surface === 'dirt' || edge.surface === 'gravel') {
+      hasUnpavedSegments = true;
+      warnings.push(`Unpaved surface along ${edge.pathwayName}.`);
     }
-    if (e.slope === 'steep') {
-      warnings.push(`Steep incline along ${e.pathwayName}`);
+    if (edge.slope === 'steep') {
+      maxSlope = 'steep';
+      warnings.push(`Steep incline along ${edge.pathwayName}.`);
+    } else if (edge.slope === 'moderate' && maxSlope !== 'steep') {
+      maxSlope = 'moderate';
+    } else if (edge.slope === 'gentle' && maxSlope === 'flat') {
+      maxSlope = 'gentle';
     }
+  }
+
+  let surfaceSummary = '100% Paved & Step-Free (Wheelchair Friendly)';
+  if (hasStairs) {
+    surfaceSummary = `Contains ${stairsFlightCount} flight${stairsFlightCount > 1 ? 's' : ''} of stairs`;
+  } else if (hasUnpavedSegments) {
+    surfaceSummary = 'Paved with unpaved section';
+  } else if (maxSlope === 'steep') {
+    surfaceSummary = 'Paved with steep slope';
+  } else if (maxSlope === 'moderate') {
+    surfaceSummary = 'Paved with moderate incline';
   }
 
   return {
     pathNodeIds,
-    totalDistance: realDist,
-    edgesUsed: edges,
-    isAccessible: allStepFree && !pathHasStairs,
-    hasStairs: pathHasStairs,
+    edgesUsed,
+    totalDistanceMeters,
+    routeGeometry: fullGeometry,
+    isStepFree,
+    hasStairs,
+    stairsFlightCount,
+    maxSlope,
+    hasUnpavedSegments,
+    surfaceSummary,
     warnings: Array.from(new Set(warnings)),
     routeFound: true,
+    algorithmUsed,
   };
 }
 
+/* ==========================================================================
+   PRIMARY PEDESTRIAN ROUTING SERVICE API
+   ========================================================================== */
+
 /**
- * Calculates pedestrian route between two geographic coordinates on UENR campus.
- * Supports standard and verified step-free/wheelchair accessible navigation modes.
+ * Calculates the shortest valid walking route between any two geographic coordinates
+ * on the UENR campus using connected pedestrian paths.
+ *
+ * Optimizes total walking distance in metres.
  */
 export async function calculatePedestrianRoute(
   start: { name: string; coordinates: [number, number] },
   end: { name: string; coordinates: [number, number] },
-  options: { preference?: RoutingPreference } = {}
+  options: ShortestPathOptions = {}
 ): Promise<RouteInfo> {
-  const { preference = 'all' } = options;
+  const {
+    preference = 'all',
+    algorithm = 'astar',
+    snappingThreshold = DEFAULT_SNAPPING_THRESHOLD_METERS,
+    walkingSpeed,
+  } = options;
+
   const [startLat, startLng] = start.coordinates;
   const [endLat, endLng] = end.coordinates;
 
-  const directDistance = calculateDistanceMeters(startLat, startLng, endLat, endLng);
+  // 1. Validate coordinate presence and numeric validity
+  if (
+    typeof startLat !== 'number' ||
+    typeof startLng !== 'number' ||
+    typeof endLat !== 'number' ||
+    typeof endLng !== 'number' ||
+    isNaN(startLat) ||
+    isNaN(startLng) ||
+    isNaN(endLat) ||
+    isNaN(endLng)
+  ) {
+    return createErrorRoute(
+      start,
+      end,
+      'invalid_coordinates',
+      'Coordinates are missing or malformed. Please select a valid point on the campus map.'
+    );
+  }
+
+  // 2. Validate campus bounding coordinates
+  const isStartInCampus = isCoordinateWithinCampus(startLat, startLng);
+  const isEndInCampus = isCoordinateWithinCampus(endLat, endLng);
+
+  if (!isStartInCampus || !isEndInCampus) {
+    return createErrorRoute(
+      start,
+      end,
+      'out_of_bounds',
+      'The specified location is outside the verified UENR Sunyani campus boundary. Please select a point within the university campus.'
+    );
+  }
+
+  // 3. Handle identical or zero-distance coordinates
+  const directDistance = calculateGeodesicDistanceMeters(startLat, startLng, endLat, endLng);
   if (directDistance < 5) {
     return {
       coordinates: [[startLat, startLng]],
@@ -640,6 +860,7 @@ export async function calculatePedestrianRoute(
       accessibility: {
         isStepFree: true,
         hasStairs: false,
+        stairsFlightCount: 0,
         maxSlope: 'flat',
         hasUnpavedSegments: false,
         isVerifiedAccessible: true,
@@ -647,112 +868,48 @@ export async function calculatePedestrianRoute(
         surfaceSummary: 'Current location',
       },
       preferenceUsed: preference,
+      algorithmUsed: algorithm,
       startPoint: start,
       endPoint: end,
     };
   }
 
-  // When an accessible route is requested, strictly use our verified UENR campus graph
-  // because third-party generic routing engines do not verify campus stairs or curb ramps.
-  if (preference === 'step_free' || preference === 'wheelchair' || preference === 'avoid_stairs') {
-    return generateDijkstraCampusRoute(start, end, preference);
+  // 4. Snapping: Find closest valid pedestrian network nodes
+  const startSnap = findClosestNode(startLat, startLng, activeGraph.nodes, snappingThreshold);
+  const endSnap = findClosestNode(endLat, endLng, activeGraph.nodes, snappingThreshold);
+
+  if (!startSnap || !endSnap) {
+    return createErrorRoute(
+      start,
+      end,
+      'no_path_found',
+      'Pedestrian walkway data is currently unavailable on this campus sector.'
+    );
   }
 
-  // Standard Pedestrian Routing: attempt OSRM first, then fallback to campus Dijkstra
-  try {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 2000);
-
-    const url = `https://router.project-osrm.org/route/v1/foot/${startLng},${startLat};${endLng},${endLat}?overview=full&geometries=geojson&steps=true`;
-    const res = await fetch(url, { signal: controller.signal });
-    clearTimeout(timeoutId);
-
-    if (res.ok) {
-      const data = await res.json();
-      if (data.code === 'Ok' && data.routes && data.routes.length > 0) {
-        const route = data.routes[0];
-        const coordinates: [number, number][] = route.geometry.coordinates.map(
-          (c: [number, number]) => [c[1], c[0]]
-        );
-
-        const steps: RouteStep[] = [];
-        if (route.legs && route.legs[0] && route.legs[0].steps) {
-          route.legs[0].steps.forEach((s: any) => {
-            const maneuver = s.maneuver || {};
-            const loc: [number, number] = maneuver.location
-              ? [maneuver.location[1], maneuver.location[0]]
-              : [startLat, startLng];
-
-            let text = s.name ? `Walk along ${s.name}` : 'Walk along campus pathway';
-            if (maneuver.type === 'depart') {
-              text = `Start walk from ${start.name}`;
-            } else if (maneuver.type === 'arrive') {
-              text = `Arrive at destination: ${end.name}`;
-            } else if (maneuver.modifier) {
-              const mod = maneuver.modifier.replace(/_/g, ' ');
-              text = `Turn ${mod}${s.name ? ` onto ${s.name}` : ''}`;
-            }
-
-            steps.push({
-              instruction: text,
-              distance: Math.round(s.distance || 0),
-              duration: Math.round(s.duration || 0),
-              location: loc,
-              modifier: maneuver.modifier,
-              type: maneuver.type,
-            });
-          });
-        }
-
-        if (coordinates.length >= 2) {
-          return {
-            coordinates,
-            distance: Math.round(route.distance),
-            duration: Math.round(route.duration),
-            steps: steps.length > 0 ? steps : generateStepInstructionsFromCoords(start, end, coordinates),
-            accessibility: {
-              isStepFree: true,
-              hasStairs: false,
-              maxSlope: 'flat',
-              hasUnpavedSegments: false,
-              isVerifiedAccessible: true,
-              accessibilityWarnings: [],
-              surfaceSummary: 'Standard pedestrian pathway',
-            },
-            preferenceUsed: preference,
-            startPoint: start,
-            endPoint: end,
-          };
-        }
-      }
-    }
-  } catch {
-    // Graceful fallback to verified campus Dijkstra graph
+  if (!startSnap.isWithinThreshold || !endSnap.isWithinThreshold) {
+    const offPoint = !startSnap.isWithinThreshold ? start.name : end.name;
+    const offDist = !startSnap.isWithinThreshold ? startSnap.distanceMeters : endSnap.distanceMeters;
+    return createErrorRoute(
+      start,
+      end,
+      'outside_snapping_threshold',
+      `"${offPoint}" is ${offDist} m away from the nearest campus pedestrian path (maximum permitted snapping threshold: ${snappingThreshold} m). Please select an on-campus building or entrance.`
+    );
   }
 
-  return generateDijkstraCampusRoute(start, end, preference);
-}
+  const startNode = startSnap.node;
+  const endNode = endSnap.node;
 
-function generateDijkstraCampusRoute(
-  start: { name: string; coordinates: [number, number] },
-  end: { name: string; coordinates: [number, number] },
-  preference: RoutingPreference = 'all'
-): RouteInfo {
-  const [startLat, startLng] = start.coordinates;
-  const [endLat, endLng] = end.coordinates;
+  // 5. Execute shortest path algorithm over the verified campus graph
+  const pathResult =
+    algorithm === 'dijkstra'
+      ? dijkstraShortestPath(startNode.id, endNode.id, { preference }, activeGraph.nodes, activeGraph.edges)
+      : astarShortestPath(startNode.id, endNode.id, { preference }, activeGraph.nodes, activeGraph.edges);
 
-  const startNode = findClosestNode(startLat, startLng);
-  const endNode = findClosestNode(endLat, endLng);
-
-  const startOffsetDist = calculateDistanceMeters(startLat, startLng, startNode.coordinates[0], startNode.coordinates[1]);
-  const endOffsetDist = calculateDistanceMeters(endLat, endLng, endNode.coordinates[0], endNode.coordinates[1]);
-
-  const isEstimated = startOffsetDist > 45 || endOffsetDist > 45;
-
-  const dijkstraResult = dijkstra(startNode.id, endNode.id, { preference });
-
-  // Handle case when no route matches accessibility constraints
-  if (!dijkstraResult.routeFound || dijkstraResult.pathNodeIds.length === 0) {
+  if (!pathResult.routeFound) {
+    const isAccessiblePref =
+      preference === 'step_free' || preference === 'wheelchair' || preference === 'avoid_stairs';
     return {
       coordinates: [
         [startLat, startLng],
@@ -762,218 +919,305 @@ function generateDijkstraCampusRoute(
       duration: 0,
       steps: [
         {
-          instruction:
-            "We couldn't verify an accessible route for this destination. Please choose another route or consult campus support at the Main Gate or Health Clinic.",
+          instruction: isAccessiblePref
+            ? 'No verified step-free accessible route found between these locations.'
+            : 'No connected pedestrian pathway found between these locations.',
           distance: 0,
           duration: 0,
           location: [startLat, startLng],
           type: 'arrive',
         },
       ],
-      isEstimatedRoute: true,
-      noAccessibleRouteFound: true,
-      routeNotice:
-        "We couldn't verify an accessible route for this destination. Please choose another route or consult campus support.",
+      noAccessibleRouteFound: isAccessiblePref,
+      error: {
+        type: isAccessiblePref ? 'inaccessible' : 'no_path_found',
+        message: pathResult.errorMessage || 'No valid walking path exists between these locations.',
+      },
       accessibility: {
         isStepFree: false,
         hasStairs: false,
+        stairsFlightCount: 0,
         maxSlope: 'unknown',
         hasUnpavedSegments: false,
         isVerifiedAccessible: false,
-        accessibilityWarnings: [
-          'No verified step-free pathway exists between these points without traversing steps or steep terrain.',
-        ],
-        surfaceSummary: 'Inaccessible under chosen criteria',
+        accessibilityWarnings: pathResult.warnings,
+        surfaceSummary: 'Inaccessible',
       },
       preferenceUsed: preference,
+      algorithmUsed: algorithm,
       startPoint: start,
       endPoint: end,
     };
   }
 
-  const { pathNodeIds, edgesUsed, isAccessible, hasStairs, warnings } = dijkstraResult;
+  // 6. Connect origin and destination approaches to the network
+  const finalPolyline: [number, number][] = [];
 
-  // Build full coordinate polyline
-  const fullPolyline: [number, number][] = [[startLat, startLng]];
-  for (const nodeId of pathNodeIds) {
-    const node = CAMPUS_NODES[nodeId];
-    if (node) {
-      fullPolyline.push(node.coordinates);
-    }
+  // Approach from origin to startNode (only if origin is offset from node)
+  if (startSnap.distanceMeters > 3) {
+    finalPolyline.push([startLat, startLng]);
   }
-  fullPolyline.push([endLat, endLng]);
 
-  // Remove duplicate consecutive coordinates
-  const cleanedCoords: [number, number][] = [];
-  for (let i = 0; i < fullPolyline.length; i++) {
-    const pt = fullPolyline[i];
+  // Network path geometry
+  for (const pt of pathResult.routeGeometry) {
     if (
-      i === 0 ||
-      calculateDistanceMeters(pt[0], pt[1], cleanedCoords[cleanedCoords.length - 1][0], cleanedCoords[cleanedCoords.length - 1][1]) > 2
+      finalPolyline.length === 0 ||
+      calculateGeodesicDistanceMeters(
+        pt[0],
+        pt[1],
+        finalPolyline[finalPolyline.length - 1][0],
+        finalPolyline[finalPolyline.length - 1][1]
+      ) > 1
     ) {
-      cleanedCoords.push(pt);
+      finalPolyline.push(pt);
     }
   }
 
-  // Calculate actual distance
-  let calculatedDist = 0;
-  for (let i = 0; i < cleanedCoords.length - 1; i++) {
-    calculatedDist += calculateDistanceMeters(
-      cleanedCoords[i][0],
-      cleanedCoords[i][1],
-      cleanedCoords[i + 1][0],
-      cleanedCoords[i + 1][1]
-    );
+  // Final egress from endNode to destination
+  if (endSnap.distanceMeters > 3) {
+    if (
+      calculateGeodesicDistanceMeters(
+        endLat,
+        endLng,
+        finalPolyline[finalPolyline.length - 1][0],
+        finalPolyline[finalPolyline.length - 1][1]
+      ) > 1
+    ) {
+      finalPolyline.push([endLat, endLng]);
+    }
   }
 
-  // Walking speed: ~1.2 m/s (or 1.0 m/s for wheelchair/accessible)
-  const speed = preference === 'wheelchair' ? 1.0 : 1.2;
-  const calculatedDuration = Math.round(calculatedDist / speed);
+  // 7. Calculate exact total walkable distance in meters
+  const totalWalkDistance = computeGeometryLength(finalPolyline);
 
-  // Generate Turn-by-Turn step instructions with accessibility notes
+  // 8. Walking time estimate (clearly calculated from walking speed)
+  const effectiveSpeed =
+    walkingSpeed ||
+    (preference === 'wheelchair' || preference === 'step_free'
+      ? ACCESSIBLE_WALKING_SPEED_MPS
+      : STANDARD_WALKING_SPEED_MPS);
+  const calculatedDuration = Math.round(totalWalkDistance / effectiveSpeed);
+
+  const isEstimated = startSnap.distanceMeters > 40 || endSnap.distanceMeters > 40;
+
+  // 9. Generate step-by-step navigation instructions
   const steps: RouteStep[] = [];
 
-  const firstLegDist = calculateDistanceMeters(cleanedCoords[0][0], cleanedCoords[0][1], cleanedCoords[1][0], cleanedCoords[1][1]);
+  // Depart step
+  const firstLegDist =
+    finalPolyline.length >= 2
+      ? calculateGeodesicDistanceMeters(
+          finalPolyline[0][0],
+          finalPolyline[0][1],
+          finalPolyline[1][0],
+          finalPolyline[1][1]
+        )
+      : 0;
+
   steps.push({
-    instruction: startOffsetDist > 45
-      ? `Start from ${start.name} and follow connecting pathway toward ${startNode.name}`
-      : `Head along campus walkway toward ${startNode.name}`,
-    distance: firstLegDist,
-    duration: Math.round(firstLegDist / speed),
-    location: cleanedCoords[0],
+    instruction:
+      startSnap.distanceMeters > 30
+        ? `Start from ${start.name} and follow approach walkway towards ${startNode.name}`
+        : `Start walking from ${startNode.name}`,
+    distance: Math.round(firstLegDist),
+    duration: Math.round(firstLegDist / effectiveSpeed),
+    location: finalPolyline[0],
     type: 'depart',
-    accessibilityNote: startOffsetDist > 45 ? 'Approach pathway surface may vary.' : undefined,
+    accessibilityNote:
+      startSnap.distanceMeters > 30 ? 'Initial approach path from building entrance' : undefined,
   });
 
-  // Intermediate turns
-  for (let i = 1; i < cleanedCoords.length - 1; i++) {
-    const prev = cleanedCoords[i - 1];
-    const curr = cleanedCoords[i];
-    const next = cleanedCoords[i + 1];
+  // Intermediate turns along edges
+  for (let i = 0; i < pathResult.edgesUsed.length; i++) {
+    const edge = pathResult.edgesUsed[i];
+    const toNode = activeGraph.nodes[pathResult.pathNodeIds[i + 1]];
+    const edgeDist = edge.distance;
 
-    const b1 = calculateBearing(prev[0], prev[1], curr[0], curr[1]);
-    const b2 = calculateBearing(curr[0], curr[1], next[0], next[1]);
-    const turn = getTurnDirection(b1, b2);
-
-    const legDist = calculateDistanceMeters(curr[0], curr[1], next[0], next[1]);
-
-    let targetName = 'next walkway';
-    let edgeNote: string | undefined = undefined;
-    if (i - 1 < pathNodeIds.length) {
-      const targetNode = CAMPUS_NODES[pathNodeIds[i]];
-      if (targetNode) targetName = targetNode.name;
+    let instruction = `Continue along ${edge.pathwayName}`;
+    if (toNode) {
+      instruction = `Walk along ${edge.pathwayName} towards ${toNode.name}`;
     }
-    if (i - 1 < edgesUsed.length) {
-      const edge = edgesUsed[i - 1];
-      if (edge) {
-        if (edge.hasStairs) edgeNote = 'Contains stairs flight';
-        else if (edge.notes) edgeNote = edge.notes;
-        else if (edge.surface === 'dirt') edgeNote = 'Unpaved pathway';
-      }
+
+    let accNote = edge.notes;
+    if (edge.hasStairs) {
+      accNote = `Contains stairs flight (${edge.stairsCount || 10}+ steps)`;
+    } else if (edge.hasRamp) {
+      accNote = 'Gradual wheelchair ramp';
     }
 
     steps.push({
-      instruction:
-        turn === 'continue straight'
-          ? `Continue straight past ${targetName}`
-          : `${turn.charAt(0).toUpperCase() + turn.slice(1)} towards ${targetName}`,
-      distance: legDist,
-      duration: Math.round(legDist / speed),
-      location: curr,
-      modifier: turn,
+      instruction,
+      distance: Math.round(edgeDist),
+      duration: Math.round(edgeDist / effectiveSpeed),
+      location: activeGraph.nodes[pathResult.pathNodeIds[i]]?.coordinates || finalPolyline[0],
       type: 'turn',
-      accessibilityNote: edgeNote,
+      pathwayName: edge.pathwayName,
+      accessibilityNote: accNote,
     });
   }
 
-  // Final Step: Arrive
+  // Arrive step
   steps.push({
     instruction: `Arrive at destination: ${end.name}`,
     distance: 0,
     duration: 0,
-    location: cleanedCoords[cleanedCoords.length - 1],
+    location: finalPolyline[finalPolyline.length - 1],
     type: 'arrive',
   });
 
-  // Surface and slope summary
-  const hasUnpaved = edgesUsed.some((e) => e.surface === 'dirt');
-  let maxSlope: AccessibilitySlope = 'flat';
-  if (edgesUsed.some((e) => e.slope === 'steep')) maxSlope = 'steep';
-  else if (edgesUsed.some((e) => e.slope === 'moderate')) maxSlope = 'moderate';
-
-  let surfaceSummary = '100% Paved & Step-Free (Wheelchair Friendly)';
-  if (hasStairs) surfaceSummary = 'Contains Stairs Flight';
-  else if (hasUnpaved) surfaceSummary = 'Paved with unpaved dirt section';
-  else if (maxSlope === 'moderate') surfaceSummary = 'Paved with moderate incline';
-
-  const routeNotice = isEstimated
-    ? 'Navigation includes estimated approach segments from off-network origin or destination.'
-    : undefined;
-
   return {
-    coordinates: cleanedCoords,
-    distance: calculatedDist,
+    coordinates: finalPolyline,
+    distance: totalWalkDistance,
     duration: calculatedDuration,
     steps,
     isEstimatedRoute: isEstimated,
-    routeNotice,
+    routeNotice: isEstimated
+      ? 'Route includes approach segments from building entrance or courtyard.'
+      : undefined,
     accessibility: {
-      isStepFree: isAccessible,
-      hasStairs,
-      maxSlope,
-      hasUnpavedSegments: hasUnpaved,
-      isVerifiedAccessible: isAccessible,
-      accessibilityWarnings: warnings,
-      surfaceSummary,
+      isStepFree: pathResult.isStepFree,
+      hasStairs: pathResult.hasStairs,
+      stairsFlightCount: pathResult.stairsFlightCount,
+      maxSlope: pathResult.maxSlope,
+      hasUnpavedSegments: pathResult.hasUnpavedSegments,
+      isVerifiedAccessible: pathResult.isStepFree && !pathResult.hasStairs,
+      accessibilityWarnings: pathResult.warnings,
+      surfaceSummary: pathResult.surfaceSummary,
     },
     preferenceUsed: preference,
+    algorithmUsed: pathResult.algorithmUsed,
     startPoint: start,
     endPoint: end,
   };
 }
 
-function generateStepInstructionsFromCoords(
+/**
+ * Creates a structured error route object with honest notification
+ */
+function createErrorRoute(
   start: { name: string; coordinates: [number, number] },
   end: { name: string; coordinates: [number, number] },
-  coords: [number, number][]
-): RouteStep[] {
-  const steps: RouteStep[] = [];
-  if (coords.length < 2) return steps;
+  type: 'out_of_bounds' | 'outside_snapping_threshold' | 'no_path_found' | 'inaccessible' | 'invalid_coordinates',
+  message: string
+): RouteInfo {
+  return {
+    coordinates: [],
+    distance: 0,
+    duration: 0,
+    steps: [
+      {
+        instruction: message,
+        distance: 0,
+        duration: 0,
+        location: start.coordinates,
+        type: 'arrive',
+      },
+    ],
+    error: {
+      type,
+      message,
+    },
+    accessibility: {
+      isStepFree: false,
+      hasStairs: false,
+      stairsFlightCount: 0,
+      maxSlope: 'unknown',
+      hasUnpavedSegments: false,
+      isVerifiedAccessible: false,
+      accessibilityWarnings: [message],
+      surfaceSummary: 'Unavailable',
+    },
+    startPoint: start,
+    endPoint: end,
+  };
+}
 
-  steps.push({
-    instruction: `Start walking from ${start.name}`,
-    distance: calculateDistanceMeters(coords[0][0], coords[0][1], coords[1][0], coords[1][1]),
-    duration: Math.round(calculateDistanceMeters(coords[0][0], coords[0][1], coords[1][0], coords[1][1]) / 1.2),
-    location: coords[0],
-    type: 'depart',
-  });
+/* ==========================================================================
+   ADMINISTRATIVE GRAPH VALIDATION UTILITIES
+   ========================================================================== */
 
-  for (let i = 1; i < coords.length - 1; i++) {
-    const b1 = calculateBearing(coords[i - 1][0], coords[i - 1][1], coords[i][0], coords[i][1]);
-    const b2 = calculateBearing(coords[i][0], coords[i][1], coords[i + 1][0], coords[i + 1][1]);
-    const turn = getTurnDirection(b1, b2);
-    const dist = calculateDistanceMeters(coords[i][0], coords[i][1], coords[i + 1][0], coords[i + 1][1]);
+export interface GraphConnectivityReport {
+  isValid: boolean;
+  totalNodes: number;
+  totalEdges: number;
+  isolatedNodeIds: string[];
+  connectedComponentCount: number;
+  summary: string;
+}
 
-    if (turn !== 'continue straight' || i === Math.floor(coords.length / 2)) {
-      steps.push({
-        instruction: turn === 'continue straight' ? 'Continue straight along path' : `Turn ${turn}`,
-        distance: dist,
-        duration: Math.round(dist / 1.2),
-        location: coords[i],
-        modifier: turn,
-        type: 'turn',
-      });
+/**
+ * Validates graph connectivity, checks for disconnected components and isolated nodes
+ */
+export function validateGraphConnectivity(
+  nodes: Record<string, PedestrianNode> = activeGraph.nodes,
+  edges: PedestrianEdge[] = activeGraph.edges
+): GraphConnectivityReport {
+  const nodeIds = Object.keys(nodes);
+  const totalNodes = nodeIds.length;
+  const totalEdges = edges.length;
+
+  if (totalNodes === 0) {
+    return {
+      isValid: false,
+      totalNodes: 0,
+      totalEdges: 0,
+      isolatedNodeIds: [],
+      connectedComponentCount: 0,
+      summary: 'Graph is empty.',
+    };
+  }
+
+  // Build undirected adjacency
+  const adj: Record<string, string[]> = {};
+  for (const id of nodeIds) {
+    adj[id] = [];
+  }
+
+  for (const edge of edges) {
+    if (adj[edge.from] && adj[edge.to]) {
+      adj[edge.from].push(edge.to);
+      adj[edge.to].push(edge.from);
     }
   }
 
-  steps.push({
-    instruction: `Arrive at ${end.name}`,
-    distance: 0,
-    duration: 0,
-    location: coords[coords.length - 1],
-    type: 'arrive',
-  });
+  // Find isolated nodes (0 edges connected)
+  const isolatedNodeIds = nodeIds.filter((id) => adj[id].length === 0);
 
-  return steps;
+  // Count connected components using BFS
+  const visited = new Set<string>();
+  let componentCount = 0;
+
+  for (const id of nodeIds) {
+    if (!visited.has(id)) {
+      componentCount++;
+      const queue = [id];
+      visited.add(id);
+
+      while (queue.length > 0) {
+        const curr = queue.shift()!;
+        for (const neighbor of adj[curr] || []) {
+          if (!visited.has(neighbor)) {
+            visited.add(neighbor);
+            queue.push(neighbor);
+          }
+        }
+      }
+    }
+  }
+
+  const isValid = isolatedNodeIds.length === 0 && componentCount === 1;
+
+  let summary = `Graph has ${totalNodes} verified nodes and ${totalEdges} paths. Complete connectivity verified.`;
+  if (!isValid) {
+    summary = `Warning: ${componentCount} separate network components detected. ${isolatedNodeIds.length} isolated nodes found.`;
+  }
+
+  return {
+    isValid,
+    totalNodes,
+    totalEdges,
+    isolatedNodeIds,
+    connectedComponentCount: componentCount,
+    summary,
+  };
 }
-

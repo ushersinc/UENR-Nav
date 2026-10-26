@@ -27,6 +27,7 @@ import {
   AlertTriangle,
   Info,
   CheckCheck,
+  Footprints,
 } from 'lucide-react';
 import {
   CampusCategory,
@@ -36,10 +37,22 @@ import {
   NoticeCategory,
   NoticePriority,
   NoticeStatus,
+  PedestrianEdge,
+  PedestrianNode,
 } from '../types/campus';
 import { CATEGORY_METAS } from '../data/campusLocations';
 import { useAuth } from '../context/AuthContext';
-import { calculateDistanceMeters } from '../services/routingService';
+import {
+  calculateDistanceMeters,
+  validateGraphConnectivity,
+  GraphConnectivityReport,
+  setActiveCampusGraph,
+  getActiveCampusGraph,
+} from '../services/routingService';
+import {
+  VERIFIED_CAMPUS_NODES,
+  VERIFIED_CAMPUS_EDGES,
+} from '../data/pedestrianGraphData';
 import {
   saveLocationToServer,
   deleteLocationOnServer,
@@ -49,6 +62,9 @@ import {
   toggleNoticeOnServer,
   deleteNoticeOnServer,
   resetLocationsToDefault,
+  fetchPedestrianGraph,
+  updatePedestrianEdgeOnServer,
+  resetPedestrianGraphOnServer,
 } from '../services/storageService';
 
 interface AdminPanelModalProps {
@@ -90,11 +106,114 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
   const [isLoggingIn, setIsLoggingIn] = useState(false);
   const [actionLoading, setActionLoading] = useState(false);
 
-  const [activeTab, setActiveTab] = useState<'locations' | 'reports' | 'notices' | 'import_export'>('locations');
+  const [activeTab, setActiveTab] = useState<
+    'locations' | 'reports' | 'notices' | 'walkways' | 'import_export'
+  >('locations');
   const [editingLocation, setEditingLocation] = useState<CampusLocation | null>(null);
   const [isAddingNew, setIsAddingNew] = useState(false);
   const [searchFilter, setSearchFilter] = useState('');
   const [statusFilter, setStatusFilter] = useState<'all' | 'verified' | 'needs_review' | 'unverified'>('all');
+
+  // In-modal dialog & notification states (eliminating native browser alert & confirm)
+  const [confirmDialog, setConfirmDialog] = useState<{
+    isOpen: boolean;
+    title: string;
+    message: string;
+    confirmLabel: string;
+    isDestructive?: boolean;
+    onConfirm: () => void | Promise<void>;
+  }>({
+    isOpen: false,
+    title: '',
+    message: '',
+    confirmLabel: 'Confirm',
+    onConfirm: () => {},
+  });
+  const [bannerMessage, setBannerMessage] = useState<{
+    type: 'success' | 'error' | 'info';
+    text: string;
+  } | null>(null);
+
+  // Walkways & Pedestrian Graph State
+  const [walkwayEdges, setWalkwayEdges] = useState<PedestrianEdge[]>(() => [...VERIFIED_CAMPUS_EDGES]);
+  const [graphConnectivity, setGraphConnectivity] = useState<GraphConnectivityReport | null>(null);
+  const [edgeSearchFilter, setEdgeSearchFilter] = useState('');
+
+  // Sync pedestrian graph from server on mount
+  useEffect(() => {
+    fetchPedestrianGraph().then((data) => {
+      if (data && data.edges && data.edges.length > 0) {
+        setWalkwayEdges(data.edges);
+        setActiveCampusGraph({
+          nodes: data.nodes || VERIFIED_CAMPUS_NODES,
+          edges: data.edges,
+          version: '2.0.0-synced',
+          lastUpdated: new Date().toISOString(),
+        });
+      }
+    });
+  }, []);
+
+  const handleToggleEdgeClosure = async (edgeId: string) => {
+    const target = walkwayEdges.find((e) => e.id === edgeId);
+    if (!target) return;
+    const newClosed = !target.isTemporarilyClosed;
+    const reason = newClosed ? 'Campus pathway maintenance / temporary closure' : undefined;
+
+    const updatedList = walkwayEdges.map((e) =>
+      e.id === edgeId ? { ...e, isTemporarilyClosed: newClosed, closureReason: reason } : e
+    );
+    setWalkwayEdges(updatedList);
+    setActiveCampusGraph({
+      nodes: VERIFIED_CAMPUS_NODES,
+      edges: updatedList,
+      version: '2.0.0-updated',
+      lastUpdated: new Date().toISOString(),
+    });
+
+    try {
+      const token = await getIdToken();
+      await updatePedestrianEdgeOnServer(
+        edgeId,
+        { isTemporarilyClosed: newClosed, closureReason: reason },
+        token || undefined
+      );
+    } catch (e) {
+      console.warn('Could not sync closure to server:', e);
+    }
+  };
+
+  const handleValidateGraph = () => {
+    const report = validateGraphConnectivity(VERIFIED_CAMPUS_NODES, walkwayEdges);
+    setGraphConnectivity(report);
+  };
+
+  const handleResetWalkways = () => {
+    setConfirmDialog({
+      isOpen: true,
+      title: 'Reset Pedestrian Graph',
+      message: 'Are you sure you want to reset the campus pedestrian graph to the verified official OpenStreetMap baseline? Custom closures will be cleared.',
+      confirmLabel: 'Reset Graph',
+      isDestructive: true,
+      onConfirm: async () => {
+        setWalkwayEdges([...VERIFIED_CAMPUS_EDGES]);
+        setActiveCampusGraph({
+          nodes: VERIFIED_CAMPUS_NODES,
+          edges: [...VERIFIED_CAMPUS_EDGES],
+          version: '2.0.0-verified',
+          lastUpdated: new Date().toISOString(),
+        });
+        setGraphConnectivity(null);
+        try {
+          const token = await getIdToken();
+          await resetPedestrianGraphOnServer(token || undefined);
+          setBannerMessage({ type: 'success', text: 'Pedestrian graph successfully reset to verified OpenStreetMap baseline.' });
+        } catch (e) {
+          console.warn('Could not sync reset to server:', e);
+        }
+      },
+    });
+  };
 
   // Location form state
   const [formName, setFormName] = useState('');
@@ -234,12 +353,12 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
     const lngNum = parseFloat(formLng);
 
     if (isNaN(latNum) || isNaN(lngNum)) {
-      alert('Coordinates must be valid decimal numbers (e.g. 7.3502 and -2.3425)');
+      setBannerMessage({ type: 'error', text: 'Coordinates must be valid decimal numbers (e.g. 7.3502 and -2.3425).' });
       return;
     }
 
     if (latNum < 7.33 || latNum > 7.37 || lngNum < -2.36 || lngNum > -2.32) {
-      alert('Coordinates are outside UENR Sunyani campus boundary (7.33 - 7.37 N, -2.36 - -2.32 W).');
+      setBannerMessage({ type: 'error', text: 'Coordinates are outside UENR Sunyani campus boundary (7.33 - 7.37 N, -2.36 - -2.32 W).' });
       return;
     }
 
@@ -273,31 +392,42 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
         onUpdateLocations([saved, ...locations]);
         setIsAddingNew(false);
         onFocusLocation(saved);
+        setBannerMessage({ type: 'success', text: `Added new verified campus location: "${saved.name}"` });
       } else {
         const updated = locations.map((l) => (l.id === saved.id ? saved : l));
         onUpdateLocations(updated);
         setEditingLocation(null);
+        setBannerMessage({ type: 'success', text: `Updated details for "${saved.name}"` });
       }
     } catch (err: any) {
-      alert(err.message || 'Failed to save location.');
+      setBannerMessage({ type: 'error', text: err.message || 'Failed to save location.' });
     } finally {
       setActionLoading(false);
     }
   };
 
-  const handleDeleteLocation = async (id: string) => {
-    if (!confirm('Are you sure you want to delete this campus location?')) return;
-
-    setActionLoading(true);
-    try {
-      await deleteLocationOnServer(id);
-      const updated = locations.filter((l) => l.id !== id);
-      onUpdateLocations(updated);
-    } catch (err: any) {
-      alert(err.message || 'Failed to delete location.');
-    } finally {
-      setActionLoading(false);
-    }
+  const handleDeleteLocation = (id: string) => {
+    const targetLoc = locations.find((l) => l.id === id);
+    setConfirmDialog({
+      isOpen: true,
+      title: 'Delete Campus Location',
+      message: `Are you sure you want to delete ${targetLoc ? `"${targetLoc.name}"` : 'this location'}? This will remove the map pin and routing access point.`,
+      confirmLabel: 'Delete Location',
+      isDestructive: true,
+      onConfirm: async () => {
+        setActionLoading(true);
+        try {
+          await deleteLocationOnServer(id);
+          const updated = locations.filter((l) => l.id !== id);
+          onUpdateLocations(updated);
+          setBannerMessage({ type: 'success', text: 'Campus location deleted successfully.' });
+        } catch (err: any) {
+          setBannerMessage({ type: 'error', text: err.message || 'Failed to delete location.' });
+        } finally {
+          setActionLoading(false);
+        }
+      },
+    });
   };
 
   const handleExportGeoJSON = () => {
@@ -371,11 +501,11 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
 
   const handleSaveNotice = async (overrideStatus?: NoticeStatus) => {
     if (!noticeTitle.trim()) {
-      alert('Announcement title is required.');
+      setBannerMessage({ type: 'error', text: 'Announcement title is required.' });
       return;
     }
     if (!noticeMessage.trim()) {
-      alert('Announcement message is required.');
+      setBannerMessage({ type: 'error', text: 'Announcement message is required.' });
       return;
     }
 
@@ -401,6 +531,7 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
           active: finalStatus !== 'archived',
         });
         onUpdateNotices(notices.map((n) => (n.id === editingNotice.id ? updated : n)));
+        setBannerMessage({ type: 'success', text: `Updated announcement "${updated.title}"` });
       } else {
         // Create new announcement
         const created = await createNoticeOnServer({
@@ -418,6 +549,7 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
           active: finalStatus !== 'archived',
         });
         onUpdateNotices([created, ...notices]);
+        setBannerMessage({ type: 'success', text: `Published announcement "${created.title}"` });
       }
 
       // Reset form
@@ -434,7 +566,7 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
       setNoticeEndTime('');
       setIsPreviewingNotice(false);
     } catch (err: any) {
-      alert(err.message || 'Failed to save announcement.');
+      setBannerMessage({ type: 'error', text: err.message || 'Failed to save announcement.' });
     } finally {
       setActionLoading(false);
     }
@@ -474,42 +606,63 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
     try {
       const updated = await toggleNoticeOnServer(n.id, !n.active);
       onUpdateNotices(notices.map((item) => (item.id === n.id ? updated : item)));
+      setBannerMessage({
+        type: 'info',
+        text: `Announcement "${n.title}" is now ${updated.active ? 'active' : 'hidden'}.`,
+      });
     } catch (err: any) {
-      alert(err.message || 'Failed to toggle notice.');
+      setBannerMessage({ type: 'error', text: err.message || 'Failed to toggle notice.' });
     }
   };
 
-  const handleDeleteNotice = async (id: string) => {
-    if (!confirm('Are you sure you want to permanently delete this campus announcement? This action cannot be undone.')) {
-      return;
-    }
-    try {
-      await deleteNoticeOnServer(id);
-      onUpdateNotices(notices.filter((n) => n.id !== id));
-      if (editingNotice?.id === id) {
-        handleCancelNoticeEdit();
-      }
-    } catch (err: any) {
-      alert(err.message || 'Failed to delete notice.');
-    }
+  const handleDeleteNotice = (id: string) => {
+    const target = notices.find((n) => n.id === id);
+    setConfirmDialog({
+      isOpen: true,
+      title: 'Delete Campus Announcement',
+      message: `Are you sure you want to permanently delete "${target?.title || 'this announcement'}"? This action cannot be undone.`,
+      confirmLabel: 'Delete Notice',
+      isDestructive: true,
+      onConfirm: async () => {
+        try {
+          await deleteNoticeOnServer(id);
+          onUpdateNotices(notices.filter((n) => n.id !== id));
+          if (editingNotice?.id === id) {
+            handleCancelNoticeEdit();
+          }
+          setBannerMessage({ type: 'success', text: 'Announcement deleted.' });
+        } catch (err: any) {
+          setBannerMessage({ type: 'error', text: err.message || 'Failed to delete notice.' });
+        }
+      },
+    });
   };
 
   const handleUpdateReport = async (repId: string, status: CampusReport['status']) => {
     try {
       const updated = await updateReportStatus(repId, status);
       onUpdateReports(reports.map((r) => (r.id === repId ? updated : r)));
+      setBannerMessage({ type: 'success', text: `Report marked as ${status}.` });
     } catch (err: any) {
-      alert(err.message || 'Failed to update report.');
+      setBannerMessage({ type: 'error', text: err.message || 'Failed to update report status.' });
     }
   };
 
   const handleResetDefaults = () => {
-    if (confirm('Reset all locations to the verified UENR official defaults? Custom edits will be cleared.')) {
-      const reset = resetLocationsToDefault();
-      onUpdateLocations(reset);
-      setEditingLocation(null);
-      setIsAddingNew(false);
-    }
+    setConfirmDialog({
+      isOpen: true,
+      title: 'Reset Campus Locations to Baseline',
+      message: 'Are you sure you want to reset all campus locations to the verified UENR official defaults? Custom edits will be cleared.',
+      confirmLabel: 'Reset to Defaults',
+      isDestructive: true,
+      onConfirm: () => {
+        const reset = resetLocationsToDefault();
+        onUpdateLocations(reset);
+        setEditingLocation(null);
+        setIsAddingNew(false);
+        setBannerMessage({ type: 'success', text: 'All campus locations restored to verified UENR defaults.' });
+      },
+    });
   };
 
   return (
@@ -714,6 +867,7 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
                   { id: 'locations', label: `Locations (${locations.length})`, icon: MapPin },
                   { id: 'reports', label: `Student Reports (${reports.length})`, icon: Flag },
                   { id: 'notices', label: `Campus Notices (${notices.length})`, icon: Bell },
+                  { id: 'walkways', label: `Walkways (${walkwayEdges.length})`, icon: Footprints },
                   { id: 'import_export', label: 'Import & Export', icon: FileDown },
                 ].map((tab) => {
                   const Icon = tab.icon;
@@ -744,6 +898,37 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
                 </button>
               )}
             </div>
+
+            {/* Action Feedback Banner */}
+            {bannerMessage && (
+              <div
+                className={`px-4 py-2.5 flex items-center justify-between text-xs font-semibold animate-in fade-in duration-150 shrink-0 ${
+                  bannerMessage.type === 'error'
+                    ? 'bg-red-50 text-red-800 border-b border-red-200'
+                    : bannerMessage.type === 'success'
+                    ? 'bg-emerald-50 text-emerald-800 border-b border-emerald-200'
+                    : 'bg-blue-50 text-blue-800 border-b border-blue-200'
+                }`}
+              >
+                <div className="flex items-center gap-2">
+                  {bannerMessage.type === 'error' ? (
+                    <AlertCircle className="w-4 h-4 text-red-600 shrink-0" />
+                  ) : bannerMessage.type === 'success' ? (
+                    <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                  ) : (
+                    <Info className="w-4 h-4 text-blue-600 shrink-0" />
+                  )}
+                  <span>{bannerMessage.text}</span>
+                </div>
+                <button
+                  onClick={() => setBannerMessage(null)}
+                  className="p-1 hover:bg-black/5 rounded text-current opacity-70 hover:opacity-100"
+                  title="Dismiss notification"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            )}
 
             {/* Location Manager Tab */}
             {activeTab === 'locations' && (
@@ -1662,21 +1847,29 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
 
                                 if (validNewLocs.length > 0) {
                                   onUpdateLocations([...validNewLocs, ...locations]);
-                                  alert(
-                                    `Successfully imported ${validNewLocs.length} verified campus locations!${
-                                      rejectedCount > 0
-                                        ? ` (${rejectedCount} outside UENR campus boundary were rejected)`
-                                        : ''
-                                    }`
-                                  );
+                                  setBannerMessage({
+                                    type: 'success',
+                                    text: `Successfully imported ${validNewLocs.length} verified campus locations!${
+                                      rejectedCount > 0 ? ` (${rejectedCount} outside UENR boundary were skipped)` : ''
+                                    }`,
+                                  });
                                 } else {
-                                  alert('No features inside UENR Sunyani boundary were found in this file.');
+                                  setBannerMessage({
+                                    type: 'error',
+                                    text: 'No features inside UENR Sunyani boundary were found in this file.',
+                                  });
                                 }
                               } else {
-                                alert('Invalid GeoJSON format. Must be a FeatureCollection.');
+                                setBannerMessage({
+                                  type: 'error',
+                                  text: 'Invalid GeoJSON format. Must be a FeatureCollection.',
+                                });
                               }
                             } catch {
-                              alert('Failed to parse GeoJSON file.');
+                              setBannerMessage({
+                                type: 'error',
+                                text: 'Failed to parse GeoJSON file. Please check syntax.',
+                              });
                             }
                           };
                           reader.readAsText(file);
@@ -1708,7 +1901,7 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
                               const text = event.target?.result as string;
                               const lines = text.split('\n').map((l) => l.trim()).filter(Boolean);
                               if (lines.length < 2) {
-                                alert('CSV file is empty or missing data rows.');
+                                setBannerMessage({ type: 'error', text: 'CSV file is empty or missing data rows.' });
                                 return;
                               }
 
@@ -1721,7 +1914,10 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
                               const statIdx = headerCols.findIndex((c) => c === 'verificationstatus' || c === 'status');
 
                               if (latIdx === -1 || lngIdx === -1 || nameIdx === -1) {
-                                alert('CSV must include "name", "latitude", and "longitude" columns.');
+                                setBannerMessage({
+                                  type: 'error',
+                                  text: 'CSV must include "name", "latitude", and "longitude" columns.',
+                                });
                                 return;
                               }
 
@@ -1768,12 +1964,18 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
 
                               if (imported.length > 0) {
                                 onUpdateLocations([...imported, ...locations]);
-                                alert(`Successfully imported ${imported.length} facilities from CSV! (${rejected} skipped)`);
+                                setBannerMessage({
+                                  type: 'success',
+                                  text: `Successfully imported ${imported.length} facilities from CSV! (${rejected} skipped outside campus bounds)`,
+                                });
                               } else {
-                                alert('No valid UENR coordinates found in CSV.');
+                                setBannerMessage({
+                                  type: 'error',
+                                  text: 'No valid UENR coordinates found in CSV.',
+                                });
                               }
                             } catch {
-                              alert('Failed to parse CSV file.');
+                              setBannerMessage({ type: 'error', text: 'Failed to parse CSV spreadsheet file.' });
                             }
                           };
                           reader.readAsText(file);
@@ -1784,6 +1986,228 @@ export const AdminPanelModal: React.FC<AdminPanelModalProps> = ({
                 </div>
               </div>
             )}
+
+            {/* Walkways & Routing Network Tab */}
+            {activeTab === 'walkways' && (
+              <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-4">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-black/10">
+                  <div>
+                    <h3 className="font-bold text-sm sm:text-base text-slate-800 flex items-center gap-2">
+                      <Footprints className="w-4 h-4 text-[#176B45]" />
+                      <span>Verified Pedestrian Pathway Network</span>
+                    </h3>
+                    <p className="text-xs text-slate-500">
+                      Manage real campus walkways, temporary path closures, and ground accessibility attributes
+                    </p>
+                  </div>
+
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <button
+                      onClick={handleValidateGraph}
+                      className="px-3 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer"
+                      title="Test graph for isolated nodes or disconnected pathway components"
+                    >
+                      <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
+                      <span>Validate Connectivity</span>
+                    </button>
+                    <button
+                      onClick={handleResetWalkways}
+                      className="px-3 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer"
+                      title="Reset graph to verified official OpenStreetMap baseline"
+                    >
+                      <RotateCcw className="w-3.5 h-3.5 text-slate-500" />
+                      <span>Reset to Baseline</span>
+                    </button>
+                  </div>
+                </div>
+
+                {/* Graph Connectivity Report Banner */}
+                {graphConnectivity && (
+                  <div
+                    className={`p-3.5 rounded-2xl border text-xs flex items-start gap-2.5 ${
+                      graphConnectivity.isValid
+                        ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
+                        : 'bg-amber-50 border-amber-200 text-amber-900'
+                    }`}
+                  >
+                    {graphConnectivity.isValid ? (
+                      <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
+                    ) : (
+                      <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                    )}
+                    <div className="flex-1 space-y-1">
+                      <div className="font-bold">
+                        {graphConnectivity.isValid
+                          ? 'Graph Topology Valid & Fully Connected'
+                          : 'Network Topology Advisory'}
+                      </div>
+                      <p className="text-[11px] leading-relaxed">{graphConnectivity.summary}</p>
+                    </div>
+                  </div>
+                )}
+
+                {/* Search / Filter bar for walkways */}
+                <div className="flex items-center gap-2">
+                  <div className="relative flex-1">
+                    <Search className="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                    <input
+                      type="text"
+                      placeholder="Search verified pathways by name or connected nodes..."
+                      value={edgeSearchFilter}
+                      onChange={(e) => setEdgeSearchFilter(e.target.value)}
+                      className="w-full pl-8 pr-3 py-1.5 rounded-xl border border-black/10 bg-slate-50 text-xs focus:bg-white focus:outline-none focus:ring-1 focus:ring-[#176B45]"
+                    />
+                  </div>
+                </div>
+
+                {/* Edges List */}
+                <div className="space-y-2.5">
+                  {walkwayEdges
+                    .filter((edge) => {
+                      if (!edgeSearchFilter.trim()) return true;
+                      const term = edgeSearchFilter.toLowerCase();
+                      const fromName = VERIFIED_CAMPUS_NODES[edge.from]?.name.toLowerCase() || '';
+                      const toName = VERIFIED_CAMPUS_NODES[edge.to]?.name.toLowerCase() || '';
+                      return (
+                        edge.pathwayName.toLowerCase().includes(term) ||
+                        fromName.includes(term) ||
+                        toName.includes(term)
+                      );
+                    })
+                    .map((edge) => {
+                      const fromNode = VERIFIED_CAMPUS_NODES[edge.from];
+                      const toNode = VERIFIED_CAMPUS_NODES[edge.to];
+                      return (
+                        <div
+                          key={edge.id}
+                          className={`p-3.5 rounded-2xl border transition-all ${
+                            edge.isTemporarilyClosed
+                              ? 'bg-amber-50/60 border-amber-200'
+                              : 'bg-white border-black/10 hover:border-black/20 shadow-xs'
+                          }`}
+                        >
+                          <div className="flex items-start justify-between gap-3">
+                            <div className="space-y-1 flex-1 min-w-0">
+                              <div className="flex items-center gap-2 flex-wrap">
+                                <span className="font-bold text-xs text-slate-800">
+                                  {edge.pathwayName}
+                                </span>
+                                <span className="text-[10px] font-semibold px-2 py-0.5 rounded bg-slate-100 text-slate-700">
+                                  {edge.distance} m
+                                </span>
+                                {edge.isTemporarilyClosed ? (
+                                  <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-amber-500 text-white">
+                                    Temporarily Closed
+                                  </span>
+                                ) : (
+                                  <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-emerald-100 text-emerald-800">
+                                    Open
+                                  </span>
+                                )}
+                              </div>
+
+                              <div className="text-[11px] text-slate-500 flex items-center gap-1.5 flex-wrap">
+                                <span>{fromNode?.name || edge.from}</span>
+                                <span className="text-slate-300">↔</span>
+                                <span>{toNode?.name || edge.to}</span>
+                              </div>
+
+                              <div className="flex items-center gap-1.5 pt-1 flex-wrap text-[10px]">
+                                {edge.hasStairs ? (
+                                  <span className="px-1.5 py-0.5 rounded bg-amber-100 text-amber-800 font-semibold">
+                                    Stairs ({edge.stairsCount || 10}+ steps)
+                                  </span>
+                                ) : edge.isStepFree ? (
+                                  <span className="px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-800 font-semibold">
+                                    Step-Free
+                                  </span>
+                                ) : null}
+
+                                <span className="px-1.5 py-0.5 rounded bg-slate-100 text-slate-600 capitalize">
+                                  Surface: {edge.surface}
+                                </span>
+
+                                <span className="px-1.5 py-0.5 rounded bg-slate-100 text-slate-600 capitalize">
+                                  Slope: {edge.slope}
+                                </span>
+
+                                {edge.notes && (
+                                  <span className="text-slate-500 italic">
+                                    Note: {edge.notes}
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+
+                            <button
+                              onClick={() => handleToggleEdgeClosure(edge.id)}
+                              className={`px-3 py-1.5 rounded-xl text-xs font-semibold shrink-0 transition-colors cursor-pointer ${
+                                edge.isTemporarilyClosed
+                                  ? 'bg-emerald-600 text-white hover:bg-emerald-700'
+                                  : 'bg-amber-100 text-amber-900 hover:bg-amber-200'
+                              }`}
+                            >
+                              {edge.isTemporarilyClosed ? 'Reopen Pathway' : 'Mark Closed'}
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* In-Modal Confirmation Dialog (replaces browser confirm dialog) */}
+        {confirmDialog.isOpen && (
+          <div className="fixed inset-0 z-60 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs animate-in fade-in duration-150">
+            <div className="bg-white rounded-2xl shadow-2xl border border-black/15 max-w-md w-full p-5 space-y-4 animate-in zoom-in-95 duration-150 text-[#263238]">
+              <div className="flex items-start gap-3">
+                <div
+                  className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 ${
+                    confirmDialog.isDestructive
+                      ? 'bg-red-100 text-red-600'
+                      : 'bg-[#176B45]/15 text-[#176B45]'
+                  }`}
+                >
+                  <AlertTriangle className="w-5 h-5" />
+                </div>
+                <div className="flex-1">
+                  <h3 className="font-bold text-sm text-slate-900 leading-snug">
+                    {confirmDialog.title}
+                  </h3>
+                  <p className="text-xs text-slate-600 mt-1 leading-relaxed">
+                    {confirmDialog.message}
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex items-center justify-end gap-2 pt-2 border-t border-black/5">
+                <button
+                  type="button"
+                  onClick={() => setConfirmDialog((prev) => ({ ...prev, isOpen: false }))}
+                  className="px-3.5 py-2 rounded-xl text-xs font-semibold text-slate-600 hover:bg-slate-100 transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={async () => {
+                    const action = confirmDialog.onConfirm;
+                    setConfirmDialog((prev) => ({ ...prev, isOpen: false }));
+                    await action();
+                  }}
+                  className={`px-4 py-2 rounded-xl text-xs font-semibold text-white transition-colors shadow-sm ${
+                    confirmDialog.isDestructive
+                      ? 'bg-red-600 hover:bg-red-700'
+                      : 'bg-[#176B45] hover:bg-[#125537]'
+                  }`}
+                >
+                  {confirmDialog.confirmLabel}
+                </button>
+              </div>
+            </div>
           </div>
         )}
       </div>

@@ -508,3 +508,104 @@ export function markAllNoticesAsRead(noticeIds: string[], userId?: string): stri
   return updated;
 }
 
+/* ==========================================================================
+   PEDESTRIAN GRAPH MANAGEMENT (Server API Sync)
+   ========================================================================== */
+
+export async function fetchPedestrianGraph(): Promise<{
+  nodes: Record<string, any>;
+  edges: any[];
+} | null> {
+  try {
+    const res = await fetch('/api/pedestrian-graph');
+    if (res.ok) {
+      return await res.json();
+    }
+  } catch (e) {
+    console.warn('Could not fetch remote pedestrian graph, using local verified baseline:', e);
+  }
+  return null;
+}
+
+export async function savePedestrianEdgeOnServer(
+  edgeData: any,
+  idToken?: string
+): Promise<any | null> {
+  try {
+    const token = idToken || (await auth.currentUser?.getIdToken());
+    const res = await fetch('/api/admin/pedestrian-graph/edges', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify(edgeData),
+    });
+    if (res.ok) {
+      return await res.json();
+    }
+  } catch (e) {
+    console.error('Failed to create edge on server:', e);
+  }
+  return null;
+}
+
+export async function updatePedestrianEdgeOnServer(
+  id: string,
+  updates: any,
+  idToken?: string
+): Promise<any | null> {
+  try {
+    const token = idToken || (await auth.currentUser?.getIdToken());
+    const res = await fetch(`/api/admin/pedestrian-graph/edges/${id}`, {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify(updates),
+    });
+    if (res.ok) {
+      return await res.json();
+    }
+  } catch (e) {
+    console.error('Failed to update edge on server:', e);
+  }
+  return null;
+}
+
+export async function deletePedestrianEdgeOnServer(
+  id: string,
+  idToken?: string
+): Promise<boolean> {
+  try {
+    const token = idToken || (await auth.currentUser?.getIdToken());
+    const res = await fetch(`/api/admin/pedestrian-graph/edges/${id}`, {
+      method: 'DELETE',
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    });
+    return res.ok;
+  } catch (e) {
+    console.error('Failed to delete edge on server:', e);
+    return false;
+  }
+}
+
+export async function resetPedestrianGraphOnServer(idToken?: string): Promise<boolean> {
+  try {
+    const token = idToken || (await auth.currentUser?.getIdToken());
+    const res = await fetch('/api/admin/pedestrian-graph/reset', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    });
+    return res.ok;
+  } catch (e) {
+    console.error('Failed to reset graph on server:', e);
+    return false;
+  }
+}
+

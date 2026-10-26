@@ -204,12 +204,40 @@ export const DirectionsPanel: React.FC<DirectionsPanelProps> = ({
       {isLoading ? (
         <div className="p-8 text-center text-slate-500 flex flex-col items-center justify-center space-y-2">
           <div className="w-7 h-7 border-3 border-[#176B45] border-t-transparent rounded-full animate-spin" />
-          <div className="text-xs font-medium">Calculating verified campus route...</div>
+          <div className="text-xs font-medium">Calculating shortest verified campus route...</div>
         </div>
       ) : route ? (
         <>
-          {/* No Accessible Route Found Warning Screen */}
-          {route.noAccessibleRouteFound ? (
+          {/* Route Calculation Error Screen */}
+          {route.error ? (
+            <div className="p-5 sm:p-6 text-center space-y-3 bg-red-50/80 border-b border-red-200">
+              <div className="w-10 h-10 rounded-2xl bg-red-100 text-red-800 flex items-center justify-center mx-auto">
+                <AlertCircle className="w-5 h-5 text-red-600" />
+              </div>
+              <div className="text-sm font-bold text-slate-800">
+                {route.error.type === 'outside_snapping_threshold'
+                  ? 'Outside Verified Walkway Range'
+                  : route.error.type === 'out_of_bounds'
+                  ? 'Off-Campus Location'
+                  : route.error.type === 'inaccessible'
+                  ? 'No Verified Accessible Route Found'
+                  : 'Route Unavailable'}
+              </div>
+              <p className="text-xs text-slate-600 leading-relaxed max-w-sm mx-auto">
+                {route.error.message}
+              </p>
+              {route.error.type === 'inaccessible' && (
+                <div className="pt-1">
+                  <button
+                    onClick={() => onChangePreference('all')}
+                    className="px-3.5 py-1.5 rounded-xl bg-[#176B45] text-white text-xs font-semibold hover:bg-[#125537] transition-colors"
+                  >
+                    Switch to Standard Pedestrian Route
+                  </button>
+                </div>
+              )}
+            </div>
+          ) : route.noAccessibleRouteFound ? (
             <div className="p-5 sm:p-6 text-center space-y-3 bg-amber-50/70 border-b border-amber-200">
               <div className="w-10 h-10 rounded-2xl bg-amber-100 text-amber-800 flex items-center justify-center mx-auto">
                 <AlertTriangle className="w-5 h-5" />
@@ -237,14 +265,15 @@ export const DirectionsPanel: React.FC<DirectionsPanelProps> = ({
                     <span className="font-display font-bold text-base text-[#176B45]">
                       {formatWalkingDuration(route.duration)}
                     </span>
-                    <span className="text-xs text-slate-500">walk</span>
+                    <span className="text-[11px] text-slate-500 font-medium">est. walk</span>
                   </div>
                   <span className="text-slate-300">|</span>
                   <div className="flex items-center gap-1.5">
                     <Footprints className="w-4 h-4 text-slate-500" />
-                    <span className="font-semibold text-xs text-slate-700">
+                    <span className="font-semibold text-xs text-slate-800">
                       {formatDistance(route.distance)}
                     </span>
+                    <span className="text-[10px] text-slate-400 font-medium">shortest</span>
                   </div>
                 </div>
 

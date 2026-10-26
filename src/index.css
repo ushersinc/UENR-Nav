@@ -90,3 +90,20 @@ body {
 ::-webkit-scrollbar-thumb:hover {
   background: rgba(23, 107, 69, 0.4);
 }
+
+/* Accessibility: Visible Focus Rings & Reduced Motion */
+:focus-visible {
+  outline: 2px solid #176B45;
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  ::before,
+  ::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}

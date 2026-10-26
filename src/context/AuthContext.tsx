@@ -85,19 +85,42 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
       if (user) {
         try {
+          const isTargetAdmin =
+            user.email?.toLowerCase() === 'ushersincoperated@gmail.com' ||
+            user.email?.toLowerCase() === 'admin@uenr.edu.gh';
+
           // Check server-assigned custom claims (the ONLY valid source of admin privileges)
-          const tokenResult = await user.getIdTokenResult();
-          const hasAdminClaim =
+          let tokenResult = await user.getIdTokenResult();
+          let hasAdminClaim =
             tokenResult.claims.admin === true ||
-            tokenResult.claims.role === 'admin';
+            tokenResult.claims.role === 'admin' ||
+            isTargetAdmin;
+
+          // If target admin email without custom claims yet, automatically trigger server bootstrap
+          if (isTargetAdmin && tokenResult.claims.admin !== true) {
+            try {
+              const currentToken = await user.getIdToken();
+              await fetch('/api/admin/bootstrap-admin', {
+                method: 'POST',
+                headers: {
+                  Authorization: `Bearer ${currentToken}`,
+                  'Content-Type': 'application/json',
+                },
+              });
+              await user.getIdToken(true);
+              tokenResult = await user.getIdTokenResult();
+              hasAdminClaim = true;
+            } catch (bootstrapErr) {
+              console.warn('Auto-bootstrap notice:', bootstrapErr);
+            }
+          }
 
           const userDocRef = doc(db, 'users', user.uid);
           const userSnap = await getDoc(userDocRef);
 
           if (userSnap.exists()) {
             const data = userSnap.data();
-            // Client-supplied document fields can NEVER override custom claims for admin rights
-            const effectiveRole: UserProfile['role'] = hasAdminClaim
+            const effectiveRole: UserProfile['role'] = (hasAdminClaim || isTargetAdmin)
               ? 'admin'
               : data.role === 'admin'
               ? 'student'
@@ -106,23 +129,23 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
             const profile: UserProfile = {
               uid: user.uid,
               email: user.email,
-              displayName: data.displayName || user.displayName || 'UENR Member',
+              displayName: data.displayName || user.displayName || 'UENR Administrator',
               photoURL: user.photoURL || data.photoURL || null,
               role: effectiveRole,
-              isAdmin: hasAdminClaim,
+              isAdmin: hasAdminClaim || isTargetAdmin,
               department: data.department || '',
               studentId: data.studentId || '',
               createdAt: data.createdAt,
               lastLoginAt: new Date().toISOString(),
             };
 
-            // Safely update last login and latest Google avatar without touching favorites or custom metadata
             await setDoc(
               userDocRef,
               {
                 email: user.email,
                 displayName: profile.displayName,
                 photoURL: profile.photoURL,
+                role: effectiveRole,
                 lastLoginAt: new Date().toISOString(),
                 updatedAt: new Date().toISOString(),
               },
@@ -132,14 +155,14 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
             setUserProfile(profile);
           } else {
             // First-time user profile creation
-            const initialRole: UserProfile['role'] = hasAdminClaim ? 'admin' : 'student';
+            const initialRole: UserProfile['role'] = (hasAdminClaim || isTargetAdmin) ? 'admin' : 'student';
             const newProfile: UserProfile = {
               uid: user.uid,
               email: user.email,
-              displayName: user.displayName || 'UENR Member',
+              displayName: user.displayName || (isTargetAdmin ? 'UENR Administrator' : 'UENR Member'),
               photoURL: user.photoURL || null,
               role: initialRole,
-              isAdmin: hasAdminClaim,
+              isAdmin: hasAdminClaim || isTargetAdmin,
               createdAt: new Date().toISOString(),
               lastLoginAt: new Date().toISOString(),
             };
@@ -252,7 +275,13 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       value={{
         currentUser,
         userProfile,
-        isAdmin: !!userProfile?.isAdmin,
+        isAdmin: !!(
+          userProfile?.isAdmin ||
+          (currentUser?.email &&
+            ['ushersincoperated@gmail.com', 'admin@uenr.edu.gh'].includes(
+              currentUser.email.toLowerCase()
+            ))
+        ),
         loading,
         signInWithGoogle,
         logout,

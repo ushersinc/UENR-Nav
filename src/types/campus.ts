@@ -89,13 +89,53 @@ export interface CampusNotice {
   updatedAt?: string;
 }
 
-export type AccessibilitySurface = 'paved' | 'asphalt' | 'concrete' | 'dirt' | 'unknown';
-export type AccessibilitySlope = 'flat' | 'moderate' | 'steep' | 'unknown';
+export type AccessibilitySurface = 'paved' | 'asphalt' | 'concrete' | 'tiles' | 'dirt' | 'gravel' | 'unknown';
+export type AccessibilitySlope = 'flat' | 'gentle' | 'moderate' | 'steep' | 'unknown';
 export type RoutingPreference = 'all' | 'step_free' | 'wheelchair' | 'avoid_stairs';
+
+export interface PedestrianNode {
+  id: string;
+  name: string;
+  coordinates: [number, number]; // [lat, lng]
+  category?: 'entrance' | 'junction' | 'building_access' | 'landmark';
+  elevation?: number;
+  source?: string;
+  verificationStatus?: 'verified' | 'unverified' | 'needs_review';
+  lastVerified?: string;
+}
+
+export interface PedestrianEdge {
+  id: string;
+  from: string;
+  to: string;
+  pathwayName: string;
+  distance: number; // in meters (sum of geodesic distances between geometry vertices)
+  geometry: [number, number][]; // actual vertices along the path curve
+  isStepFree: boolean;
+  hasStairs: boolean;
+  stairsCount?: number;
+  hasRamp?: boolean;
+  surface: AccessibilitySurface;
+  slope: AccessibilitySlope;
+  isTemporarilyClosed?: boolean;
+  closureReason?: string;
+  source?: string;
+  verificationStatus: 'verified' | 'unverified' | 'needs_review';
+  lastVerified?: string;
+  notes?: string;
+}
+
+export interface RoutingGraph {
+  nodes: Record<string, PedestrianNode>;
+  edges: PedestrianEdge[];
+  version: string;
+  lastUpdated: string;
+}
 
 export interface RouteAccessibilityInfo {
   isStepFree: boolean;
   hasStairs: boolean;
+  stairsFlightCount?: number;
   maxSlope: AccessibilitySlope;
   hasUnpavedSegments: boolean;
   isVerifiedAccessible: boolean;
@@ -112,6 +152,13 @@ export interface RouteStep {
   modifier?: string;
   type?: string;
   accessibilityNote?: string;
+  pathwayName?: string;
+}
+
+export interface RouteCalculationError {
+  type: 'out_of_bounds' | 'outside_snapping_threshold' | 'no_path_found' | 'inaccessible' | 'invalid_coordinates';
+  message: string;
+  details?: string;
 }
 
 export interface RouteInfo {
@@ -123,7 +170,9 @@ export interface RouteInfo {
   routeNotice?: string;
   accessibility?: RouteAccessibilityInfo;
   preferenceUsed?: RoutingPreference;
+  algorithmUsed?: 'astar' | 'dijkstra';
   noAccessibleRouteFound?: boolean;
+  error?: RouteCalculationError;
   startPoint: {
     name: string;
     coordinates: [number, number];
