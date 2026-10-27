@@ -166,6 +166,19 @@ export function getStoredLocations(): CampusLocation[] {
       return INITIAL_CAMPUS_LOCATIONS;
     }
 
+    // Merge any missing canonical locations into cached list
+    const idSet = new Set(parsed.map((l: CampusLocation) => l.id));
+    let hasNew = false;
+    INITIAL_CAMPUS_LOCATIONS.forEach((loc) => {
+      if (!idSet.has(loc.id)) {
+        parsed.push(loc);
+        hasNew = true;
+      }
+    });
+    if (hasNew) {
+      localStorage.setItem(KEYS.CUSTOM_LOCATIONS, JSON.stringify(parsed));
+    }
+
     return parsed;
   } catch {
     return INITIAL_CAMPUS_LOCATIONS;

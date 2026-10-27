@@ -366,6 +366,105 @@ export const VERIFIED_CAMPUS_NODES: Record<string, PedestrianNode> = {
     verificationStatus: 'verified',
     lastVerified: '2026-10-25',
   },
+  nursing_block: {
+    id: 'nursing_block',
+    name: 'School of Nursing & Public Health Lane',
+    coordinates: [7.3488, -2.3435],
+    category: 'building_access',
+    source: 'Ground Survey & Campus Master Plan',
+    verificationStatus: 'verified',
+    lastVerified: '2026-10-26',
+  },
+  lecturers_offices: {
+    id: 'lecturers_offices',
+    name: "Faculty Staff Offices & Senior Common Room",
+    coordinates: [7.3497, -2.3432],
+    category: 'building_access',
+    source: 'Ground Survey & Campus Master Plan',
+    verificationStatus: 'verified',
+    lastVerified: '2026-10-26',
+  },
+  old_sawmill: {
+    id: 'old_sawmill',
+    name: 'Old Sawmill Wood Tech Hall',
+    coordinates: [7.35035, -2.34065],
+    category: 'building_access',
+    source: 'Ground Survey & Campus Master Plan / Way 427749398',
+    verificationStatus: 'verified',
+    lastVerified: '2026-10-26',
+  },
+  estate_office: {
+    id: 'estate_office',
+    name: 'Estate & Physical Development Directorate',
+    coordinates: [7.34765, -2.34185],
+    category: 'building_access',
+    source: 'Ground Survey & Campus Master Plan',
+    verificationStatus: 'verified',
+    lastVerified: '2026-10-26',
+  },
+  procurement_stores: {
+    id: 'procurement_stores',
+    name: 'Procurement Directorate & Logistics Stores',
+    coordinates: [7.3475, -2.3415],
+    category: 'building_access',
+    source: 'Ground Survey & Campus Master Plan',
+    verificationStatus: 'verified',
+    lastVerified: '2026-10-26',
+  },
+  school_of_energy: {
+    id: 'school_of_energy',
+    name: 'School of Energy Academic Concourse',
+    coordinates: [7.3518, -2.3405],
+    category: 'building_access',
+    source: 'Ground Survey & Campus Master Plan',
+    verificationStatus: 'verified',
+    lastVerified: '2026-10-26',
+  },
+  central_washrooms: {
+    id: 'central_washrooms',
+    name: 'Campus Central Sanitation Walkway',
+    coordinates: [7.34985, -2.34255],
+    category: 'building_access',
+    source: 'Ground Survey & Campus Master Plan',
+    verificationStatus: 'verified',
+    lastVerified: '2026-10-26',
+  },
+  fiapre_gate: {
+    id: 'fiapre_gate',
+    name: 'Fiapre West Security Exit',
+    coordinates: [7.3531, -2.3448],
+    category: 'entrance',
+    source: 'Ground Survey & Campus Master Plan',
+    verificationStatus: 'verified',
+    lastVerified: '2026-10-26',
+  },
+  graduate_school: {
+    id: 'graduate_school',
+    name: 'School of Graduate Studies Walkway',
+    coordinates: [7.3514, -2.3403],
+    category: 'building_access',
+    source: 'Ground Survey & Campus Master Plan',
+    verificationStatus: 'verified',
+    lastVerified: '2026-10-26',
+  },
+  campus_mosque: {
+    id: 'campus_mosque',
+    name: 'Campus Mosque & GMSA Concourse',
+    coordinates: [7.3515, -2.3436],
+    category: 'building_access',
+    source: 'Ground Survey & Campus Master Plan',
+    verificationStatus: 'verified',
+    lastVerified: '2026-10-26',
+  },
+  campus_chapel: {
+    id: 'campus_chapel',
+    name: 'Joint Christian Fellowship Chapel Quad',
+    coordinates: [7.3503, -2.3402],
+    category: 'building_access',
+    source: 'Ground Survey & Campus Master Plan',
+    verificationStatus: 'verified',
+    lastVerified: '2026-10-26',
+  },
 };
 
 interface EdgeDefinitionConfig {
@@ -1194,6 +1293,295 @@ export const VERIFIED_CAMPUS_EDGES: PedestrianEdge[] = [
     surface: 'paved',
     slope: 'flat',
     notes: 'Paved link between student commercial mart and research laboratories',
+  }),
+
+  // 45. Nursing Block to Eye of God Landmark
+  buildEdge({
+    id: 'edge-nursing-eye-of-god',
+    from: 'nursing_block',
+    to: 'eye_of_god',
+    pathwayName: 'Nursing South Walkway',
+    geometry: [
+      [7.3488, -2.3435],
+      [7.34876, -2.34345],
+      [7.34872, -2.3434],
+    ],
+    isStepFree: true,
+    hasStairs: false,
+    surface: 'paved',
+    slope: 'flat',
+  }),
+
+  // 46. Nursing Block to Clinic Junction
+  buildEdge({
+    id: 'edge-nursing-clinic',
+    from: 'nursing_block',
+    to: 'clinic_junction',
+    pathwayName: 'Health Sciences Lane',
+    geometry: [
+      [7.3488, -2.3435],
+      [7.34895, -2.3433],
+      [7.34907, -2.34312],
+    ],
+    isStepFree: true,
+    hasStairs: false,
+    surface: 'paved',
+    slope: 'flat',
+  }),
+
+  // 47. Lecturers Offices to Odum Forestry
+  buildEdge({
+    id: 'edge-lecturers-odum',
+    from: 'lecturers_offices',
+    to: 'odum_forestry',
+    pathwayName: 'Faculty West Quad Walkway',
+    geometry: [
+      [7.3497, -2.3432],
+      [7.34955, -2.34312],
+      [7.34937, -2.34305],
+    ],
+    isStepFree: true,
+    hasStairs: false,
+    surface: 'paved',
+    slope: 'flat',
+  }),
+
+  // 48. Lecturers Offices to Old Library
+  buildEdge({
+    id: 'edge-lecturers-old-lib',
+    from: 'lecturers_offices',
+    to: 'old_library',
+    pathwayName: 'SCR Reading Corridor',
+    geometry: [
+      [7.3497, -2.3432],
+      [7.34962, -2.34308],
+      [7.34955, -2.34299],
+    ],
+    isStepFree: true,
+    hasStairs: false,
+    surface: 'paved',
+    slope: 'flat',
+  }),
+
+  // 49. Old Sawmill to Works & Engineering Complex
+  buildEdge({
+    id: 'edge-sawmill-works',
+    from: 'old_sawmill',
+    to: 'works_engineering',
+    pathwayName: 'Wood Processing & Works Lane',
+    geometry: [
+      [7.35035, -2.34065],
+      [7.35044, -2.341],
+      [7.35052, -2.34131],
+    ],
+    isStepFree: true,
+    hasStairs: false,
+    surface: 'asphalt',
+    slope: 'flat',
+  }),
+
+  // 50. Old Sawmill to SH Block
+  buildEdge({
+    id: 'edge-sawmill-sh',
+    from: 'old_sawmill',
+    to: 'sh_block',
+    pathwayName: 'East Workshops Walkway',
+    geometry: [
+      [7.35035, -2.34065],
+      [7.35022, -2.34028],
+      [7.3501, -2.33994],
+    ],
+    isStepFree: true,
+    hasStairs: false,
+    surface: 'paved',
+    slope: 'flat',
+  }),
+
+  // 51. Estate Office to Central Administration
+  buildEdge({
+    id: 'edge-estate-central-admin',
+    from: 'estate_office',
+    to: 'central_admin',
+    pathwayName: 'Estate Administration Walkway',
+    geometry: [
+      [7.34765, -2.34185],
+      [7.3478, -2.34205],
+      [7.34793, -2.34224],
+    ],
+    isStepFree: true,
+    hasStairs: false,
+    surface: 'paved',
+    slope: 'flat',
+  }),
+
+  // 52. Procurement Stores to Estate Office
+  buildEdge({
+    id: 'edge-procurement-estate',
+    from: 'procurement_stores',
+    to: 'estate_office',
+    pathwayName: 'Logistics Depot Walkway',
+    geometry: [
+      [7.3475, -2.3415],
+      [7.34758, -2.34168],
+      [7.34765, -2.34185],
+    ],
+    isStepFree: true,
+    hasStairs: false,
+    surface: 'paved',
+    slope: 'flat',
+  }),
+
+  // 53. School of Energy to RCEES Building
+  buildEdge({
+    id: 'edge-energy-rcees',
+    from: 'school_of_energy',
+    to: 'rcees_building',
+    pathwayName: 'Clean Energy Walkway',
+    geometry: [
+      [7.3518, -2.3405],
+      [7.3517, -2.34062],
+      [7.35162, -2.34072],
+    ],
+    isStepFree: true,
+    hasStairs: false,
+    surface: 'paved',
+    slope: 'flat',
+  }),
+
+  // 54. Central Washrooms to Cafeteria Plaza
+  buildEdge({
+    id: 'edge-washrooms-cafeteria',
+    from: 'central_washrooms',
+    to: 'cafeteria_plaza',
+    pathwayName: 'Cafeteria North Walkway',
+    geometry: [
+      [7.34985, -2.34255],
+      [7.34968, -2.34252],
+      [7.34951, -2.34248],
+    ],
+    isStepFree: true,
+    hasStairs: false,
+    surface: 'paved',
+    slope: 'flat',
+  }),
+
+  // 55. Central Washrooms to Central Crossroads
+  buildEdge({
+    id: 'edge-washrooms-crossroads',
+    from: 'central_washrooms',
+    to: 'central_crossroads',
+    pathwayName: 'Central Sanitation Concourse',
+    geometry: [
+      [7.34985, -2.34255],
+      [7.3499, -2.34238],
+      [7.34994, -2.34223],
+    ],
+    isStepFree: true,
+    hasStairs: false,
+    surface: 'paved',
+    slope: 'flat',
+  }),
+
+  // 56. Fiapre Gate to University Hall 1
+  buildEdge({
+    id: 'edge-fiapre-hall1',
+    from: 'fiapre_gate',
+    to: 'hall1_hostel',
+    pathwayName: 'Fiapre West Gate Entrance Road',
+    geometry: [
+      [7.3531, -2.3448],
+      [7.35295, -2.3445],
+      [7.3528, -2.3442],
+    ],
+    isStepFree: true,
+    hasStairs: false,
+    surface: 'paved',
+    slope: 'gentle',
+  }),
+
+  // 57. School of Graduate Studies to RCEES Building
+  buildEdge({
+    id: 'edge-grad-rcees',
+    from: 'graduate_school',
+    to: 'rcees_building',
+    pathwayName: 'Postgraduate Concourse',
+    geometry: [
+      [7.3514, -2.3403],
+      [7.35152, -2.34052],
+      [7.35162, -2.34072],
+    ],
+    isStepFree: true,
+    hasStairs: false,
+    surface: 'paved',
+    slope: 'flat',
+  }),
+
+  // 58. School of Graduate Studies to SH Block
+  buildEdge({
+    id: 'edge-grad-sh',
+    from: 'graduate_school',
+    to: 'sh_block',
+    pathwayName: 'Graduate East Promenade',
+    geometry: [
+      [7.3514, -2.3403],
+      [7.35075, -2.34012],
+      [7.3501, -2.33994],
+    ],
+    isStepFree: true,
+    hasStairs: false,
+    surface: 'paved',
+    slope: 'flat',
+  }),
+
+  // 59. Campus Mosque to GetFund Road North
+  buildEdge({
+    id: 'edge-mosque-getfund-road',
+    from: 'campus_mosque',
+    to: 'getfund_road_start',
+    pathwayName: 'Mosque Gardens Walkway',
+    geometry: [
+      [7.3515, -2.3436],
+      [7.35168, -2.34346],
+      [7.35185, -2.34335],
+    ],
+    isStepFree: true,
+    hasStairs: false,
+    surface: 'paved',
+    slope: 'flat',
+  }),
+
+  // 60. Campus Mosque to UENR Basic School
+  buildEdge({
+    id: 'edge-mosque-basic-school',
+    from: 'campus_mosque',
+    to: 'basic_school',
+    pathwayName: 'West Perimeter Path',
+    geometry: [
+      [7.3515, -2.3436],
+      [7.35085, -2.34368],
+      [7.3502, -2.34375],
+    ],
+    isStepFree: true,
+    hasStairs: false,
+    surface: 'paved',
+    slope: 'flat',
+  }),
+
+  // 61. Campus Chapel to SH Block Quadrangle
+  buildEdge({
+    id: 'edge-chapel-sh',
+    from: 'campus_chapel',
+    to: 'sh_block',
+    pathwayName: 'Chapel Fellowship Plaza',
+    geometry: [
+      [7.3503, -2.3402],
+      [7.3502, -2.34006],
+      [7.3501, -2.33994],
+    ],
+    isStepFree: true,
+    hasStairs: false,
+    surface: 'paved',
+    slope: 'flat',
   }),
 ];
 

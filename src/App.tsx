@@ -5,6 +5,7 @@ import { CategoryFilter } from './components/CategoryFilter';
 import { MapView } from './components/MapView';
 import { LocationDetailCard } from './components/LocationDetailCard';
 import { DirectionsPanel } from './components/DirectionsPanel';
+import { NavigationCompanionHUD } from './components/NavigationCompanionHUD';
 import { FreshersGuideModal } from './components/FreshersGuideModal';
 import { ReportIssueModal } from './components/ReportIssueModal';
 import { AdminPanelModal } from './components/AdminPanelModal';
@@ -19,7 +20,12 @@ import {
   CampusReport,
   RouteInfo,
   RoutingPreference,
+  LiveNavigationProgress,
 } from './types/campus';
+import {
+  GeolocationWatchManager,
+  calculateLiveNavigationProgress,
+} from './services/liveNavigationService';
 import { CATEGORY_METAS } from './data/campusLocations';
 import {
   getStoredLocations,
@@ -81,10 +87,23 @@ export default function App() {
   const [activeSidebarTab, setActiveSidebarTab] = useState<'explore' | 'favorites'>('explore');
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
 
-  // User Geolocation
+  // User Geolocation & Tracking
   const [userLocation, setUserLocation] = useState<[number, number] | null>(null);
   const [userAccuracy, setUserAccuracy] = useState<number | null>(null);
+  const [userHeading, setUserHeading] = useState<number | null>(null);
   const [locationError, setLocationError] = useState<string | null>(null);
+
+  // Live Navigation Companion States
+  const [isLiveNavigating, setIsLiveNavigating] = useState(false);
+  const [isFollowingUser, setIsFollowingUser] = useState(false);
+  const [liveNavProgress, setLiveNavProgress] = useState<LiveNavigationProgress | null>(null);
+  const [isRecalculating, setIsRecalculating] = useState(false);
+
+  // Geolocation watch manager ref & tracking refs
+  const watchManagerRef = React.useRef<GeolocationWatchManager>(new GeolocationWatchManager());
+  const consecutiveOffRouteCountRef = React.useRef(0);
+  const lastRecalculateTimeRef = React.useRef(0);
+  const prevProgressRef = React.useRef<LiveNavigationProgress | null>(null);
 
   // Pedestrian & Accessible Routing
   const [isDirectionsActive, setIsDirectionsActive] = useState(false);
@@ -163,12 +182,116 @@ export default function App() {
     try {
       const calculatedRoute = await calculatePedestrianRoute(start, end, { preference: pref });
       setRoute(calculatedRoute);
+      return calculatedRoute;
     } catch (err) {
       console.error('Route calculation error:', err);
+      return null;
     } finally {
       setIsCalculatingRoute(false);
     }
   };
+
+  // Start Real-Time Walking GPS Navigation
+  const handleStartLiveNavigation = () => {
+    if (!selectedLocation || !route) return;
+
+    setIsLiveNavigating(true);
+    setIsFollowingUser(true);
+    setIsMobileDrawerExpanded(false); // Collapses drawer so map dominates
+
+    watchManagerRef.current.start(
+      (coords, accuracy, heading) => {
+        setUserLocation(coords);
+        setUserAccuracy(accuracy);
+        if (typeof heading === 'number') setUserHeading(heading);
+        setLocationError(null);
+
+        if (route) {
+          const nextProg = calculateLiveNavigationProgress(
+            coords,
+            accuracy,
+            heading,
+            route,
+            prevProgressRef.current
+          );
+          prevProgressRef.current = nextProg;
+          setLiveNavProgress(nextProg);
+
+          // Automatic Off-Route Deviation Detection & Recalculation (with 8s cooldown)
+          if (nextProg.isOffRoute && !nextProg.hasArrived) {
+            consecutiveOffRouteCountRef.current += 1;
+            const now = Date.now();
+            if (
+              consecutiveOffRouteCountRef.current >= 2 &&
+              !isRecalculating &&
+              now - lastRecalculateTimeRef.current > 8000
+            ) {
+              lastRecalculateTimeRef.current = now;
+              setIsRecalculating(true);
+              computeRoute(
+                { name: 'My Current Location (GPS)', coordinates: coords },
+                { name: selectedLocation.name, coordinates: [selectedLocation.lat, selectedLocation.lng] },
+                routingPreference
+              )
+                .then((newRoute) => {
+                  if (newRoute && newRoute.error) {
+                    setLocationError(
+                      'Off-route: Unable to find a verified campus path near your position. Head toward the nearest paved walkway.'
+                    );
+                  }
+                })
+                .finally(() => {
+                  setIsRecalculating(false);
+                  consecutiveOffRouteCountRef.current = 0;
+                });
+            }
+          } else {
+            consecutiveOffRouteCountRef.current = 0;
+          }
+        }
+      },
+      (errorMsg) => {
+        setLocationError(errorMsg);
+      }
+    );
+  };
+
+  // Stop Live Walking Guidance
+  const handleStopLiveNavigation = () => {
+    watchManagerRef.current.stop();
+    setIsLiveNavigating(false);
+    setIsFollowingUser(false);
+    setLiveNavProgress(null);
+    prevProgressRef.current = null;
+    consecutiveOffRouteCountRef.current = 0;
+  };
+
+  // Resume camera follow
+  const handleResumeFollowing = () => {
+    setIsFollowingUser(true);
+  };
+
+  // Cleanup GPS subscription on component unmount
+  useEffect(() => {
+    return () => {
+      watchManagerRef.current.stop();
+    };
+  }, []);
+
+  // Update live progress when route is updated or recalculated
+  useEffect(() => {
+    if (isLiveNavigating && route && userLocation) {
+      const nextProg = calculateLiveNavigationProgress(
+        userLocation,
+        userAccuracy || 15,
+        userHeading,
+        route,
+        prevProgressRef.current
+      );
+      prevProgressRef.current = nextProg;
+      setLiveNavProgress(nextProg);
+    }
+  }, [route]);
 
   // Swap origin and destination
   const handleSwapRoutePoints = () => {
@@ -180,7 +303,6 @@ export default function App() {
     const newStart = currentEnd;
     const newEnd = routeStart;
 
-    // Find if new destination matches an existing campus location
     const matched = locations.find(
       (l) => l.lat === newEnd.coordinates[0] && l.lng === newEnd.coordinates[1]
     );
@@ -230,21 +352,75 @@ export default function App() {
     return list;
   }, [locations, selectedCategory, activeSidebarTab, favorites]);
 
-  // Handle User Location Found
-  const handleUserLocationFound = (coords: [number, number], accuracy: number) => {
+  // Handle User Location Found (one-shot or manual)
+  const handleUserLocationFound = (
+    coords: [number, number],
+    accuracy: number,
+    heading?: number | null
+  ) => {
     setUserLocation(coords);
     setUserAccuracy(accuracy);
+    if (typeof heading === 'number') setUserHeading(heading);
     setLocationError(null);
   };
 
-  // Handle URL deep-linking (?place=bog-auditorium)
+  // Deep link notification state for invalid/unmatched query parameters
+  const [deepLinkNotice, setDeepLinkNotice] = useState<string | null>(null);
+
+  // Handle URL deep-linking (?place=bog-auditorium, ?place=health-center, etc.)
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
-    const placeId = params.get('place');
-    if (placeId) {
-      const match = locations.find((l) => l.id === placeId);
+    const placeParam = params.get('place')?.trim();
+    if (placeParam && locations.length > 0) {
+      const normalizedQuery = placeParam.toLowerCase().replace(/[-_]/g, ' ');
+
+      // Canonical aliases mapping for published signage & QR code deep links
+      const aliasMap: Record<string, string> = {
+        'health-center': 'schools-clinic',
+        'clinic': 'schools-clinic',
+        'infirmary': 'schools-clinic',
+        'health': 'schools-clinic',
+        'main-gate': 'main-campus-gate',
+        'front-gate': 'main-campus-gate',
+        'auditorium': 'bog-auditorium',
+        'bog': 'bog-auditorium',
+        'lt-block': 'lt-block',
+        'lt': 'lt-block',
+        'new-library': 'new-library-complex',
+        'sawmill': 'old-sawmill-hall',
+        'nursing': 'nursing-block',
+        'estate': 'estate-development-office',
+        'procurement': 'procurement-stores',
+        'energy': 'school-of-energy',
+        'washroom': 'central-washrooms',
+        'washrooms': 'central-washrooms',
+        'fiapre-gate': 'fiapre-postern-gate',
+        'basic-school': 'uenr-basic-school',
+        'grad-school': 'graduate-school',
+        'mosque': 'campus-mosque',
+        'chapel': 'campus-chapel',
+      };
+
+      const targetId = aliasMap[placeParam.toLowerCase()] || placeParam;
+
+      const match = locations.find(
+        (l) =>
+          l.id === targetId ||
+          l.id.toLowerCase() === targetId.toLowerCase() ||
+          l.name.toLowerCase() === normalizedQuery ||
+          l.shortCode.toLowerCase() === normalizedQuery ||
+          l.aliases.some((a) => a.toLowerCase() === normalizedQuery)
+      );
+
       if (match) {
         setSelectedLocation(match);
+        setIsSidebarCollapsed(false);
+        setIsMobileDrawerExpanded(true);
+        setDeepLinkNotice(null);
+      } else {
+        setDeepLinkNotice(
+          `Requested location "${placeParam}" was not found in campus records. Displaying full directory.`
+        );
       }
     }
   }, [locations]);
@@ -336,6 +512,8 @@ export default function App() {
                     }}
                     onEnablePickOnMap={() => setIsPickingOnMap(!isPickingOnMap)}
                     isPickingOnMap={isPickingOnMap}
+                    onStartWalking={handleStartLiveNavigation}
+                    isLiveNavigating={isLiveNavigating}
                   />
                 </div>
               ) : selectedLocation ? (
@@ -514,15 +692,34 @@ export default function App() {
               onSelectLocation={handleSelectLocation}
               userLocation={userLocation}
               userAccuracy={userAccuracy}
+              userHeading={userHeading}
+              isLiveNavigating={isLiveNavigating}
+              isFollowingUser={isFollowingUser}
+              onToggleFollowUser={(following) => setIsFollowingUser(following)}
               onUserLocationFound={handleUserLocationFound}
               onUserLocationError={(err) => setLocationError(err)}
               route={route}
+              completedCoordinates={liveNavProgress?.completedCoordinates}
+              remainingCoordinates={liveNavProgress?.remainingCoordinates}
               isPickingOnMap={isPickingOnMap}
               onMapClickCoordinates={handleMapClickCoordinates}
+              onRequestStartWalking={handleStartLiveNavigation}
             />
 
+            {/* Live Walking Navigation Companion HUD */}
+            {isLiveNavigating && selectedLocation && (
+              <NavigationCompanionHUD
+                destinationName={selectedLocation.name}
+                progress={liveNavProgress}
+                isFollowingUser={isFollowingUser}
+                onResumeFollowing={handleResumeFollowing}
+                onEndNavigation={handleStopLiveNavigation}
+                isRecalculating={isRecalculating}
+              />
+            )}
+
             {/* Mobile Collapsible Bottom Drawer */}
-            {(selectedLocation || isDirectionsActive) && (
+            {(selectedLocation || isDirectionsActive) && !isLiveNavigating && (
               <div
                 className={`md:hidden absolute bottom-0 left-0 right-0 z-30 bg-white rounded-t-3xl shadow-2xl border-t border-black/15 overflow-hidden flex flex-col transition-all duration-300 ${
                   isMobileDrawerExpanded ? 'max-h-[82vh]' : 'max-h-[140px]'
@@ -585,9 +782,12 @@ export default function App() {
                       onClearDirections={() => {
                         setIsDirectionsActive(false);
                         setRoute(null);
+                        handleStopLiveNavigation();
                       }}
                       onEnablePickOnMap={() => setIsPickingOnMap(!isPickingOnMap)}
                       isPickingOnMap={isPickingOnMap}
+                      onStartWalking={handleStartLiveNavigation}
+                      isLiveNavigating={isLiveNavigating}
                     />
                   ) : selectedLocation ? (
                     <LocationDetailCard
@@ -617,6 +817,25 @@ export default function App() {
                 <button
                   onClick={() => setLocationError(null)}
                   className="text-amber-700 hover:text-amber-950 p-0.5"
+                  aria-label="Dismiss location error"
+                >
+                  ✕
+                </button>
+              </div>
+            )}
+
+            {/* Deep link location not found notice toast */}
+            {deepLinkNotice && (
+              <div className="absolute top-36 left-4 right-4 sm:left-auto sm:right-4 z-40 max-w-sm p-3.5 rounded-2xl bg-slate-900/90 text-white text-xs shadow-xl flex items-start gap-2.5 animate-in fade-in slide-in-from-top-2 backdrop-blur-sm border border-white/10">
+                <Info className="w-4 h-4 text-[#D7F36A] shrink-0 mt-0.5" />
+                <div className="flex-1">
+                  <span className="font-semibold block text-[#D7F36A]">Deep Link Notice</span>
+                  <span className="text-slate-200">{deepLinkNotice}</span>
+                </div>
+                <button
+                  onClick={() => setDeepLinkNotice(null)}
+                  className="text-slate-400 hover:text-white p-0.5"
+                  aria-label="Dismiss deep link notice"
                 >
                   ✕
                 </button>

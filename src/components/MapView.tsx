@@ -22,11 +22,18 @@ interface MapViewProps {
   onSelectLocation: (location: CampusLocation) => void;
   userLocation: [number, number] | null;
   userAccuracy?: number | null;
-  onUserLocationFound: (coords: [number, number], accuracy: number) => void;
+  userHeading?: number | null;
+  isLiveNavigating?: boolean;
+  isFollowingUser?: boolean;
+  onToggleFollowUser?: (following: boolean) => void;
+  onUserLocationFound: (coords: [number, number], accuracy: number, heading?: number | null) => void;
   onUserLocationError: (msg: string) => void;
   route: RouteInfo | null;
+  completedCoordinates?: [number, number][];
+  remainingCoordinates?: [number, number][];
   isPickingOnMap: boolean;
   onMapClickCoordinates?: (coords: [number, number]) => void;
+  onRequestStartWalking?: () => void;
 }
 
 export const MapView: React.FC<MapViewProps> = ({
@@ -35,11 +42,18 @@ export const MapView: React.FC<MapViewProps> = ({
   onSelectLocation,
   userLocation,
   userAccuracy,
+  userHeading,
+  isLiveNavigating = false,
+  isFollowingUser = false,
+  onToggleFollowUser,
   onUserLocationFound,
   onUserLocationError,
   route,
+  completedCoordinates,
+  remainingCoordinates,
   isPickingOnMap,
   onMapClickCoordinates,
+  onRequestStartWalking,
 }) => {
   const mapContainerRef = useRef<HTMLDivElement>(null);
   const mapInstanceRef = useRef<L.Map | null>(null);
@@ -55,6 +69,12 @@ export const MapView: React.FC<MapViewProps> = ({
   const streetTilesRef = useRef<L.TileLayer | null>(null);
   const satTilesRef = useRef<L.TileLayer | null>(null);
 
+  // Keep ref of following state for map event callbacks
+  const isFollowingUserRef = useRef(isFollowingUser);
+  useEffect(() => {
+    isFollowingUserRef.current = isFollowingUser;
+  }, [isFollowingUser]);
+
   // Initialize Leaflet Map
   useEffect(() => {
     if (!mapContainerRef.current || mapInstanceRef.current) return;
@@ -66,7 +86,7 @@ export const MapView: React.FC<MapViewProps> = ({
     const map = L.map(mapContainerRef.current, {
       center: [CAMPUS_CENTER.lat, CAMPUS_CENTER.lng],
       zoom: CAMPUS_CENTER.zoom,
-      minZoom: 15,
+      minZoom: 14,
       maxZoom: 19,
       maxBounds: maxBounds,
       maxBoundsViscosity: 0.8,
@@ -111,6 +131,25 @@ export const MapView: React.FC<MapViewProps> = ({
     map.on('zoomend', () => {
       setMapZoom(map.getZoom());
     });
+
+    // Pause camera follow when user manually touches, drags, or pinch-zooms map
+    const pauseFollowingOnUserGesture = () => {
+      if (isFollowingUserRef.current && onToggleFollowUser) {
+        onToggleFollowUser(false);
+      }
+    };
+
+    map.on('dragstart', pauseFollowingOnUserGesture);
+
+    const containerEl = mapContainerRef.current;
+    if (containerEl) {
+      containerEl.addEventListener('wheel', pauseFollowingOnUserGesture, { passive: true });
+      containerEl.addEventListener('touchstart', (e: TouchEvent) => {
+        if (e.touches.length > 1) {
+          pauseFollowingOnUserGesture();
+        }
+      }, { passive: true });
+    }
 
     map.on('click', (e: L.LeafletMouseEvent) => {
       if (onMapClickCoordinates) {
@@ -177,7 +216,9 @@ export const MapView: React.FC<MapViewProps> = ({
       const meta = CATEGORY_METAS[loc.category];
       const isSelected = selectedLocation?.id === loc.id;
       const color = meta ? meta.color : '#176B45';
-      const isNeedsReview = loc.verificationStatus === 'needs_review' || loc.verificationStatus === 'pending_verification';
+      const isNeedsReview =
+        loc.verificationStatus === 'needs_review' ||
+        loc.verificationStatus === 'pending_verification';
 
       // Custom HTML Pin icon
       const iconHtml = `
@@ -228,18 +269,41 @@ export const MapView: React.FC<MapViewProps> = ({
     });
   }, [locations, selectedLocation, mapZoom]);
 
-  // Center on Selected Location
+  // Center on Selected Location (when not actively in follow mode)
   useEffect(() => {
     const map = mapInstanceRef.current;
-    if (!map || !selectedLocation) return;
+    if (!map || !selectedLocation || isLiveNavigating) return;
 
     map.flyTo([selectedLocation.lat, selectedLocation.lng], 18, {
-      duration: 1.0,
+      duration: 0.9,
       easeLinearity: 0.25,
     });
-  }, [selectedLocation]);
+  }, [selectedLocation, isLiveNavigating]);
 
-  // Render User Location
+  // Real-Time Camera Follow: keep user marker centered when isFollowingUser is true
+  useEffect(() => {
+    const map = mapInstanceRef.current;
+    if (!map || !userLocation || !isFollowingUser) return;
+
+    const currentCenter = map.getCenter();
+    const distFromCenter = L.latLng(currentCenter.lat, currentCenter.lng).distanceTo(
+      L.latLng(userLocation[0], userLocation[1])
+    );
+
+    // If the map was zoomed out while exploring, smoothly fly in to walking zoom 18
+    if (map.getZoom() < 17) {
+      map.flyTo([userLocation[0], userLocation[1]], 18, {
+        duration: 0.8,
+      });
+    } else if (distFromCenter > 3) {
+      map.panTo([userLocation[0], userLocation[1]], {
+        animate: true,
+        duration: 0.7,
+      });
+    }
+  }, [userLocation, isFollowingUser]);
+
+  // Render User Location & Accuracy Indicator & Dynamic Heading Cone
   useEffect(() => {
     const map = mapInstanceRef.current;
     const userLayer = userMarkerRef.current;
@@ -251,7 +315,7 @@ export const MapView: React.FC<MapViewProps> = ({
       const [lat, lng] = userLocation;
 
       // Accuracy circle
-      if (userAccuracy && userAccuracy < 100) {
+      if (userAccuracy && userAccuracy < 150) {
         const accuracyCircle = L.circle([lat, lng], {
           radius: userAccuracy,
           color: '#176B45',
@@ -262,27 +326,38 @@ export const MapView: React.FC<MapViewProps> = ({
         userLayer.addLayer(accuracyCircle);
       }
 
-      // Live user GPS radar pin
+      // Heading directional pointer (if available)
+      const hasHeading = typeof userHeading === 'number' && !isNaN(userHeading);
+
       const userIcon = L.divIcon({
         className: 'user-gps-marker',
         html: `
-          <div class="relative w-6 h-6 flex items-center justify-center">
-            <div class="absolute inset-0 rounded-full bg-[#176B45]/30 user-location-pulse"></div>
+          <div class="relative w-8 h-8 flex items-center justify-center">
+            ${
+              hasHeading
+                ? `
+                <div class="absolute inset-0 flex items-center justify-center transition-transform duration-300" style="transform: rotate(${userHeading}deg);">
+                  <div class="w-0 h-0 border-l-[6px] border-l-transparent border-r-[6px] border-r-transparent border-b-[14px] border-b-[#176B45] -translate-y-4 filter drop-shadow"></div>
+                </div>
+                `
+                : ''
+            }
+            <div class="absolute inset-1 rounded-full bg-[#176B45]/25 user-location-pulse"></div>
             <div class="w-4 h-4 rounded-full bg-[#176B45] border-2 border-white shadow-md flex items-center justify-center">
               <div class="w-1.5 h-1.5 rounded-full bg-[#D7F36A]"></div>
             </div>
           </div>
         `,
-        iconSize: [24, 24],
-        iconAnchor: [12, 12],
+        iconSize: [32, 32],
+        iconAnchor: [16, 16],
       });
 
       const marker = L.marker([lat, lng], { icon: userIcon, zIndexOffset: 1000 });
       userLayer.addLayer(marker);
     }
-  }, [userLocation, userAccuracy]);
+  }, [userLocation, userAccuracy, userHeading]);
 
-  // Render Pedestrian Walking Route
+  // Render Pedestrian Walking Route with Completed vs Remaining Styling
   useEffect(() => {
     const map = mapInstanceRef.current;
     const routeLayer = routeLayerRef.current;
@@ -291,44 +366,77 @@ export const MapView: React.FC<MapViewProps> = ({
     routeLayer.clearLayers();
 
     if (route && route.coordinates.length > 1) {
-      // Glow under-layer
-      const underGlow = L.polyline(route.coordinates, {
-        color: '#D7F36A',
-        weight: 8,
-        opacity: 0.7,
-        lineCap: 'round',
-        lineJoin: 'round',
-      });
-      routeLayer.addLayer(underGlow);
+      if (isLiveNavigating && completedCoordinates && remainingCoordinates) {
+        // 1. Completed Path (Muted trail)
+        if (completedCoordinates.length > 1) {
+          const completedLine = L.polyline(completedCoordinates, {
+            color: '#64748B',
+            weight: 4,
+            opacity: 0.6,
+            dashArray: '6, 6',
+            lineCap: 'round',
+            lineJoin: 'round',
+          });
+          routeLayer.addLayer(completedLine);
+        }
 
-      // Primary Route Polyline (dashed if estimated approach)
-      const polyline = L.polyline(route.coordinates, {
-        color: '#176B45',
-        weight: 5,
-        opacity: 0.95,
-        dashArray: route.isEstimatedRoute ? '8, 8' : undefined,
-        lineCap: 'round',
-        lineJoin: 'round',
-        className: 'route-walking-line',
-      });
-      routeLayer.addLayer(polyline);
+        // 2. Remaining Path (Vibrant accent & glow)
+        if (remainingCoordinates.length > 1) {
+          const remainingGlow = L.polyline(remainingCoordinates, {
+            color: '#D7F36A',
+            weight: 8,
+            opacity: 0.75,
+            lineCap: 'round',
+            lineJoin: 'round',
+          });
+          routeLayer.addLayer(remainingGlow);
 
-      // Start Marker (Origin)
+          const remainingLine = L.polyline(remainingCoordinates, {
+            color: '#176B45',
+            weight: 5,
+            opacity: 0.95,
+            lineCap: 'round',
+            lineJoin: 'round',
+          });
+          routeLayer.addLayer(remainingLine);
+        }
+      } else {
+        // Standard Route Polyline
+        const underGlow = L.polyline(route.coordinates, {
+          color: '#D7F36A',
+          weight: 8,
+          opacity: 0.75,
+          lineCap: 'round',
+          lineJoin: 'round',
+        });
+        routeLayer.addLayer(underGlow);
+
+        const polyline = L.polyline(route.coordinates, {
+          color: '#176B45',
+          weight: 5,
+          opacity: 0.95,
+          dashArray: route.isEstimatedRoute ? '8, 8' : undefined,
+          lineCap: 'round',
+          lineJoin: 'round',
+        });
+        routeLayer.addLayer(polyline);
+      }
+
+      // Origin Marker (Start)
       const startCoord = route.coordinates[0];
       const startIcon = L.divIcon({
         className: 'route-start-pin',
         html: `
-          <div class="w-7 h-7 rounded-full bg-slate-800 text-white border-2 border-white flex items-center justify-center shadow-lg font-bold text-[11px]">
+          <div class="w-7 h-7 rounded-full bg-[#263238] text-white border-2 border-white flex items-center justify-center shadow-lg font-bold text-[11px]">
             A
           </div>
         `,
         iconSize: [28, 28],
         iconAnchor: [14, 14],
       });
-      const startMarker = L.marker(startCoord, { icon: startIcon });
-      routeLayer.addLayer(startMarker);
+      routeLayer.addLayer(L.marker(startCoord, { icon: startIcon }));
 
-      // End Marker (Destination)
+      // Destination Marker (End)
       const endCoord = route.coordinates[route.coordinates.length - 1];
       const endIcon = L.divIcon({
         className: 'route-end-pin',
@@ -340,16 +448,17 @@ export const MapView: React.FC<MapViewProps> = ({
         iconSize: [32, 32],
         iconAnchor: [16, 16],
       });
-      const endMarker = L.marker(endCoord, { icon: endIcon });
-      routeLayer.addLayer(endMarker);
+      routeLayer.addLayer(L.marker(endCoord, { icon: endIcon }));
 
-      // Fit map view to route bounds with comfortable padding
-      map.fitBounds(routeLayer.getBounds(), {
-        padding: [60, 60],
-        maxZoom: 18,
-      });
+      // Initial fit to bounds if not live following
+      if (!isLiveNavigating && !isFollowingUser) {
+        map.fitBounds(routeLayer.getBounds(), {
+          padding: [60, 60],
+          maxZoom: 18,
+        });
+      }
     }
-  }, [route]);
+  }, [route, isLiveNavigating, completedCoordinates, remainingCoordinates, isFollowingUser]);
 
   // Request Current Location
   const handleLocateMe = () => {
@@ -363,10 +472,13 @@ export const MapView: React.FC<MapViewProps> = ({
       (pos) => {
         setIsLocating(false);
         const coords: [number, number] = [pos.coords.latitude, pos.coords.longitude];
-        onUserLocationFound(coords, pos.coords.accuracy);
+        onUserLocationFound(coords, pos.coords.accuracy, pos.coords.heading);
 
         if (mapInstanceRef.current) {
-          mapInstanceRef.current.flyTo(coords, 18, { duration: 1 });
+          mapInstanceRef.current.flyTo(coords, 18, { duration: 0.9 });
+        }
+        if (onToggleFollowUser) {
+          onToggleFollowUser(true);
         }
       },
       (err) => {
@@ -379,12 +491,13 @@ export const MapView: React.FC<MapViewProps> = ({
         }
         onUserLocationError(errorMsg);
       },
-      { enableHighAccuracy: true, timeout: 10000, maximumAge: 15000 }
+      { enableHighAccuracy: true, timeout: 10000, maximumAge: 10000 }
     );
   };
 
   // Reset to full campus view
   const handleResetCampusView = () => {
+    if (onToggleFollowUser) onToggleFollowUser(false);
     if (mapInstanceRef.current) {
       mapInstanceRef.current.flyTo([CAMPUS_CENTER.lat, CAMPUS_CENTER.lng], CAMPUS_CENTER.zoom, {
         duration: 0.8,
@@ -402,7 +515,7 @@ export const MapView: React.FC<MapViewProps> = ({
 
   return (
     <div className="relative w-full h-full flex-1 min-h-[300px] overflow-hidden">
-      {/* Leaflet Map Div */}
+      {/* Leaflet Map Container */}
       <div ref={mapContainerRef} className="w-full h-full" />
 
       {/* Map Picking Crosshair Overlay */}
@@ -421,24 +534,47 @@ export const MapView: React.FC<MapViewProps> = ({
         <button
           onClick={() => setActiveLayer(activeLayer === 'streets' ? 'satellite' : 'streets')}
           className="p-2.5 bg-white text-[#263238] rounded-xl shadow-lg border border-black/10 hover:bg-slate-50 transition-all active:scale-95 flex items-center justify-center group"
-          title={activeLayer === 'streets' ? 'Switch to Satellite View (Esri Imagery)' : 'Switch to Street Map (OpenStreetMap)'}
+          title={
+            activeLayer === 'streets'
+              ? 'Switch to Satellite View (Esri Imagery)'
+              : 'Switch to Street Map (OpenStreetMap)'
+          }
         >
           <Layers className="w-5 h-5 text-slate-700 group-hover:text-[#176B45]" />
           <span className="sr-only">Toggle Map View</span>
         </button>
 
-        {/* Locate Me (GPS) */}
+        {/* Locate / Follow Me (GPS) */}
         <button
-          onClick={handleLocateMe}
+          onClick={() => {
+            if (isLiveNavigating) {
+              if (onToggleFollowUser) onToggleFollowUser(true);
+              if (userLocation && mapInstanceRef.current) {
+                mapInstanceRef.current.flyTo(userLocation, 18, { duration: 0.8 });
+              }
+            } else {
+              handleLocateMe();
+            }
+          }}
           disabled={isLocating}
           className={`p-2.5 rounded-xl shadow-lg border transition-all active:scale-95 flex items-center justify-center ${
-            userLocation
+            isFollowingUser
+              ? 'bg-[#176B45] text-[#D7F36A] border-[#176B45] ring-2 ring-[#D7F36A]'
+              : userLocation
               ? 'bg-[#176B45] text-[#D7F36A] border-[#176B45]'
               : 'bg-white text-slate-700 border-black/10 hover:bg-slate-50'
           }`}
-          title="Find my current location"
+          title={isFollowingUser ? 'Camera is currently following your walking position' : 'Center on my location'}
         >
-          <Locate className={`w-5 h-5 ${isLocating ? 'animate-spin text-amber-500' : ''}`} />
+          <Locate
+            className={`w-5 h-5 ${
+              isLocating
+                ? 'animate-spin text-amber-500'
+                : isFollowingUser
+                ? 'animate-pulse text-[#D7F36A]'
+                : ''
+            }`}
+          />
           <span className="sr-only">Locate Me</span>
         </button>
 
@@ -471,9 +607,27 @@ export const MapView: React.FC<MapViewProps> = ({
         </div>
       </div>
 
-      {/* Map Attribution and Coordinates Bar (Bottom Left) */}
+      {/* Floating Resume Following Banner (Bottom Center on Map) */}
+      {isLiveNavigating && !isFollowingUser && userLocation && (
+        <div className="absolute bottom-16 left-1/2 -translate-x-1/2 z-20">
+          <button
+            onClick={() => {
+              if (onToggleFollowUser) onToggleFollowUser(true);
+              if (userLocation && mapInstanceRef.current) {
+                mapInstanceRef.current.flyTo(userLocation, 18, { duration: 0.8 });
+              }
+            }}
+            className="px-4 py-2 rounded-full bg-[#176B45] text-[#D7F36A] font-bold text-xs shadow-xl border border-[#D7F36A] flex items-center gap-2 hover:brightness-105 active:scale-95 transition-all"
+          >
+            <Locate className="w-4 h-4 animate-spin" />
+            <span>Resume Following My Location</span>
+          </button>
+        </div>
+      )}
+
+      {/* Map Status Bar (Bottom Left) */}
       <div className="absolute bottom-3 left-3 z-20 pointer-events-none">
-        <div className="bg-white/90 backdrop-blur-sm px-3 py-1.5 rounded-lg text-[11px] text-slate-700 border border-black/10 shadow-md flex items-center gap-2">
+        <div className="bg-white/95 backdrop-blur-sm px-3 py-1.5 rounded-lg text-[11px] text-slate-700 border border-black/10 shadow-md flex items-center gap-2">
           <span className="font-bold text-[#176B45] flex items-center gap-1">
             <ShieldCheck className="w-3.5 h-3.5" />
             UENR Sunyani
@@ -481,7 +635,8 @@ export const MapView: React.FC<MapViewProps> = ({
           <span className="text-slate-300">·</span>
           {selectedLocation ? (
             <span className="font-mono text-slate-800">
-              {selectedLocation.name}: {selectedLocation.lat.toFixed(5)}° N, {Math.abs(selectedLocation.lng).toFixed(5)}° W
+              {selectedLocation.name}: {selectedLocation.lat.toFixed(5)}° N,{' '}
+              {Math.abs(selectedLocation.lng).toFixed(5)}° W
             </span>
           ) : (
             <span className="font-mono text-slate-600">
@@ -493,7 +648,8 @@ export const MapView: React.FC<MapViewProps> = ({
               <span className="text-slate-300">·</span>
               <span className="text-emerald-700 font-semibold flex items-center gap-1">
                 <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
-                GPS Active
+                {isLiveNavigating ? 'Live Guidance' : 'GPS Active'}
+                {typeof userAccuracy === 'number' ? ` (±${userAccuracy}m)` : ''}
               </span>
             </>
           )}

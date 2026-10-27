@@ -296,6 +296,17 @@ export const Header: React.FC<HeaderProps> = ({
                       Open 24/7
                     </span>
                   </div>
+
+                  {/* Pre-launch dispatch advisory notice */}
+                  <div className="pt-2 border-t border-black/5 text-[10px] text-slate-500 space-y-1">
+                    <div className="flex items-center gap-1 text-amber-700 font-medium">
+                      <span className="w-1.5 h-1.5 rounded-full bg-amber-500 shrink-0" />
+                      <span>Pre-Launch Notice: Contact numbers pending UENR Security signoff.</span>
+                    </div>
+                    <div>
+                      National Emergency Toll-Free: <a href="tel:112" className="text-[#176B45] font-bold underline">112</a> (Police / Ambulance)
+                    </div>
+                  </div>
                 </div>
               </div>
             )}

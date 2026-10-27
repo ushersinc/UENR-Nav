@@ -35,6 +35,47 @@ export interface CampusLocation {
   source?: string;
   osmId?: string;
   verifiedBy?: string;
+  pedestrianAccessNodeId?: string;
+}
+
+export type NavigationStatus =
+  | 'idle'
+  | 'tracking'
+  | 'on_route'
+  | 'off_route'
+  | 'recalculating'
+  | 'arrived'
+  | 'paused'
+  | 'error';
+
+export type ManeuverType =
+  | 'depart'
+  | 'straight'
+  | 'slight_left'
+  | 'turn_left'
+  | 'slight_right'
+  | 'turn_right'
+  | 'u_turn'
+  | 'arrive';
+
+export interface LiveNavigationProgress {
+  status: NavigationStatus;
+  userPosition: [number, number];
+  userAccuracy: number;
+  userHeading?: number | null;
+  distanceTraveled: number; // in meters
+  distanceRemaining: number; // in meters
+  estimatedTimeRemaining: number; // in seconds
+  percentComplete: number; // 0 - 100
+  activeStepIndex: number;
+  currentInstruction: string;
+  nextManeuver: ManeuverType;
+  distanceToNextTurn: number; // in meters
+  crossTrackDistance: number; // in meters
+  isOffRoute: boolean;
+  hasArrived: boolean;
+  completedCoordinates: [number, number][];
+  remainingCoordinates: [number, number][];
 }
 
 

@@ -32,6 +32,8 @@ interface DirectionsPanelProps {
   isPickingOnMap: boolean;
   routingPreference: RoutingPreference;
   onChangePreference: (pref: RoutingPreference) => void;
+  onStartWalking?: () => void;
+  isLiveNavigating?: boolean;
 }
 
 export const DirectionsPanel: React.FC<DirectionsPanelProps> = ({
@@ -48,6 +50,8 @@ export const DirectionsPanel: React.FC<DirectionsPanelProps> = ({
   isPickingOnMap,
   routingPreference,
   onChangePreference,
+  onStartWalking,
+  isLiveNavigating = false,
 }) => {
   const [activeStepIndex, setActiveStepIndex] = useState(0);
 
@@ -307,6 +311,25 @@ export const DirectionsPanel: React.FC<DirectionsPanelProps> = ({
                       Grade: {route.accessibility.maxSlope} slope
                     </span>
                   )}
+                </div>
+              )}
+
+              {/* Start Walking / Live Navigation CTA Button */}
+              {onStartWalking && (
+                <div className="p-3 bg-white border-b border-black/5">
+                  <button
+                    onClick={onStartWalking}
+                    className={`w-full py-2.5 px-4 rounded-xl font-bold text-xs sm:text-sm flex items-center justify-center gap-2 shadow-md transition-all active:scale-[0.98] ${
+                      isLiveNavigating
+                        ? 'bg-[#104b30] text-[#D7F36A] ring-2 ring-[#D7F36A]/60'
+                        : 'bg-[#176B45] text-white hover:bg-[#125537] hover:shadow-lg'
+                    }`}
+                  >
+                    <Navigation className={`w-4 h-4 text-[#D7F36A] ${isLiveNavigating ? 'animate-pulse' : ''}`} />
+                    <span>
+                      {isLiveNavigating ? 'Live Walking Active (Camera Following)' : 'Start Walking (Live GPS Companion)'}
+                    </span>
+                  </button>
                 </div>
               )}
 
